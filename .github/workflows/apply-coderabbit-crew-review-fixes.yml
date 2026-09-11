@@ -30,7 +30,20 @@ jobs:
         with:
           node-version: 22
       - name: Apply review patch
-        run: node scripts/apply-coderabbit-crew-review-fixes.mjs
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('tests/aerodesk-crew-staffing.test.mjs')
+          s = p.read_text()
+          needle = "actionHireCrew: typeof actionHireCrew === 'function' ? actionHireCrew : undefined,"
+          insert = needle + "\\n    ensureStaffing: typeof ensureStaffing === 'function' ? ensureStaffing : undefined,"
+          if "ensureStaffing: typeof ensureStaffing" not in s:
+              if needle not in s:
+                  raise SystemExit('crew harness marker missing')
+              s = s.replace(needle, insert, 1)
+              p.write_text(s)
+          PY
+          node scripts/apply-coderabbit-crew-review-fixes.mjs
       - name: Remove temporary automation
         run: |
           rm -f scripts/apply-coderabbit-crew-review-fixes.mjs
