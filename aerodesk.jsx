@@ -1206,15 +1206,28 @@ const CREW_DEFAULTS = {
 
 function ensureStaffing(state) {
   if (!state.staffing) {
+    const fleetCrew = (state.fleet || [])
+      .filter(f => f.status !== 'RETIRED')
+      .reduce((acc, f) => {
+        const type = aircraftType(f.typeId);
+        if (!type) return acc;
+        const crew = minimumOperatingCrew(type);
+        return {
+          pilots: acc.pilots + crew.flightDeck * 6,
+          cabinCrew: acc.cabinCrew + crew.cabin * 6,
+        };
+      }, { pilots: 0, cabinCrew: 0 });
     state.staffing = {
-      pilots: CREW_DEFAULTS.pilots,
-      cabinCrew: CREW_DEFAULTS.cabinCrew,
+      pilots: Math.max(CREW_DEFAULTS.pilots, fleetCrew.pilots),
+      cabinCrew: Math.max(CREW_DEFAULTS.cabinCrew, fleetCrew.cabinCrew),
       reserveFraction: CREW_DEFAULTS.reserveFraction,
       pipeline: [],
     };
   }
   if (!Array.isArray(state.staffing.pipeline)) state.staffing.pipeline = [];
   if (!Number.isFinite(state.staffing.reserveFraction)) state.staffing.reserveFraction = CREW_DEFAULTS.reserveFraction;
+  if (!Number.isFinite(state.staffing.pilots)) state.staffing.pilots = CREW_DEFAULTS.pilots;
+  if (!Number.isFinite(state.staffing.cabinCrew)) state.staffing.cabinCrew = CREW_DEFAULTS.cabinCrew;
   return state.staffing;
 }
 
@@ -1304,12 +1317,25 @@ function actionHireCrew(state, { pilots = 0, cabinCrew = 0 } = {}) {
   const cost = pilotCount * CREW_DEFAULTS.pilotRecruitmentCostUSD + cabinCount * CREW_DEFAULTS.cabinRecruitmentCostUSD;
   if (s.company.cash < cost) return { state: s, error: 'Trésorerie insuffisante pour le recrutement et la qualification.' };
   const nowMs = s.meta?.lastProcessedAt || Date.now();
-  const leadDays = Math.max(
-    pilotCount ? CREW_DEFAULTS.pilotRecruitmentDays : 0,
-    cabinCount ? CREW_DEFAULTS.cabinRecruitmentDays : 0,
-  );
   s.company.cash -= cost;
-  staffing.pipeline.push({ pilots: pilotCount, cabinCrew: cabinCount, cost, orderedAt: nowMs, availableAt: nowMs + leadDays * DAY_MS });
+  if (pilotCount) {
+    staffing.pipeline.push({
+      pilots: pilotCount,
+      cabinCrew: 0,
+      cost: pilotCount * CREW_DEFAULTS.pilotRecruitmentCostUSD,
+      orderedAt: nowMs,
+      availableAt: nowMs + CREW_DEFAULTS.pilotRecruitmentDays * DAY_MS,
+    });
+  }
+  if (cabinCount) {
+    staffing.pipeline.push({
+      pilots: 0,
+      cabinCrew: cabinCount,
+      cost: cabinCount * CREW_DEFAULTS.cabinRecruitmentCostUSD,
+      orderedAt: nowMs,
+      availableAt: nowMs + CREW_DEFAULTS.cabinRecruitmentDays * DAY_MS,
+    });
+  }
   addLedger(s, s.meta.week, 'CREW_RECRUITMENT', -cost, 'Recrutement, contrôles et qualification équipage');
   return { state: s, error: null };
 }
@@ -1343,11 +1369,11 @@ function crewCostForOperations(type, totalBlockHours, flights) {
 
   const regulatoryCrew = minimumOperatingCrew(type).total;
   const rosteredCrew = Math.max(type.crew, regulatoryCrew);
-  // Long sectors require augmented/rest-capable crewing and generate layover/per-diem expense.
-  const hourly = rosteredCrew * 95 * totalBlockHours * augmentation;
+  // Base salaries are part of recurring payroll; flight operations carry only variable crew costs.
+  const augmentationPremium = rosteredCrew * 95 * totalBlockHours * Math.max(0, augmentation - 1);
   const perDiem = blockPerFlight >= 6 ? rosteredCrew * 75 * flights : 0;
   const layover = blockPerFlight >= 10 ? rosteredCrew * 140 * flights : 0;
-  return hourly + perDiem + layover;
+  return augmentationPremium + perDiem + layover;
 }
 
 function applyAircraftUsage(state, aircraft, type, flownCycles, flownBlockHours, nowMs, rng = Math.random) {

@@ -206,12 +206,13 @@ test('operated flight hours and cycles are distributed across assigned aircraft 
   assert.equal(totalCycles, operated);
 });
 
-test('long-haul crew cost adds augmented staffing when duty exceeds a basic FDP envelope', () => {
+test('long-haul crew variable cost is limited to away-from-base operating expenses', () => {
   assert.equal(typeof E.crewCostForOperations, 'function');
   const type = E.AIRCRAFT_TYPES.find(t => t.id === '787-9');
   const unaugmentedLinearCost = type.crew * 95 * 14;
   const longHaulCost = E.crewCostForOperations(type, 14, 1);
-  assert.ok(longHaulCost > unaugmentedLinearCost * 1.15);
+  assert.ok(longHaulCost > 0);
+  assert.ok(longHaulCost < unaugmentedLinearCost);
 });
 
 test('scheduled maintenance is triggered by accumulated hours or cycles rather than condition alone', () => {

@@ -7,7 +7,7 @@ function loadEngine() {
   const source = fs.readFileSync(new URL('../aerodesk.jsx', import.meta.url), 'utf8');
   const start = source.indexOf('// =============================================================================\n// SIMULATION ENGINE');
   const end = source.indexOf('// =============================================================================\n// UI LAYER');
-  const engine = source.slice(start, end) + `\n;globalThis.__crew = {\n    AIRCRAFT_TYPES, DAY_MS, WEEK_MS, newGame,\n    actionHireCrew: typeof actionHireCrew === 'function' ? actionHireCrew : undefined,\n    crewLegalLimits: typeof crewLegalLimits === 'function' ? crewLegalLimits : undefined,\n    crewCapacityForPeriod: typeof crewCapacityForPeriod === 'function' ? crewCapacityForPeriod : undefined,\n    createCrewPeriodLedger: typeof createCrewPeriodLedger === 'function' ? createCrewPeriodLedger : undefined,\n    reserveCrewForRotation: typeof reserveCrewForRotation === 'function' ? reserveCrewForRotation : undefined,\n    processCrewPipeline: typeof processCrewPipeline === 'function' ? processCrewPipeline : undefined\n  };`;
+  const engine = source.slice(start, end) + `\n;globalThis.__crew = {\n    AIRCRAFT_TYPES, DAY_MS, WEEK_MS, newGame,\n    actionHireCrew: typeof actionHireCrew === 'function' ? actionHireCrew : undefined,\n    ensureStaffing: typeof ensureStaffing === 'function' ? ensureStaffing : undefined,\n    crewLegalLimits: typeof crewLegalLimits === 'function' ? crewLegalLimits : undefined,\n    crewCapacityForPeriod: typeof crewCapacityForPeriod === 'function' ? crewCapacityForPeriod : undefined,\n    createCrewPeriodLedger: typeof createCrewPeriodLedger === 'function' ? createCrewPeriodLedger : undefined,\n    reserveCrewForRotation: typeof reserveCrewForRotation === 'function' ? reserveCrewForRotation : undefined,\n    processCrewPipeline: typeof processCrewPipeline === 'function' ? processCrewPipeline : undefined\n  };`;
   const context = vm.createContext({ console, Date, Math, JSON, Intl, setTimeout, clearTimeout });
   vm.runInContext(engine, context, { filename: 'aerodesk-crew.vm.js' });
   return context.__crew;
@@ -65,8 +65,11 @@ test('crew recruitment has a lead time and does not create qualified staff insta
   const result = E.actionHireCrew(state, { pilots: 4, cabinCrew: 8 });
   assert.equal(result.error, null);
   assert.equal(result.state.staffing.pilots, before);
-  assert.equal(result.state.staffing.pipeline.length, 1);
-  assert.ok(result.state.staffing.pipeline[0].availableAt > result.state.meta.lastProcessedAt);
+  assert.equal(result.state.staffing.pipeline.length, 2);
+  const pilotBatch = result.state.staffing.pipeline.find(batch => batch.pilots);
+  const cabinBatch = result.state.staffing.pipeline.find(batch => batch.cabinCrew);
+  assert.ok(pilotBatch.availableAt > cabinBatch.availableAt);
+  assert.ok(cabinBatch.availableAt > result.state.meta.lastProcessedAt);
 });
 
 test('qualified recruits enter the active establishment only after their pipeline date', () => {
@@ -77,11 +80,31 @@ test('qualified recruits enter the active establishment only after their pipelin
   state = result.state;
   const beforePilots = state.staffing.pilots;
   const beforeCabin = state.staffing.cabinCrew;
-  const deliveryAt = state.staffing.pipeline[0].availableAt;
-  E.processCrewPipeline(state, deliveryAt - 1);
+  const firstDeliveryAt = Math.min(...state.staffing.pipeline.map(batch => batch.availableAt));
+  const finalDeliveryAt = Math.max(...state.staffing.pipeline.map(batch => batch.availableAt));
+  E.processCrewPipeline(state, firstDeliveryAt - 1);
   assert.equal(state.staffing.pilots, beforePilots);
-  E.processCrewPipeline(state, deliveryAt);
+  assert.equal(state.staffing.cabinCrew, beforeCabin);
+  E.processCrewPipeline(state, firstDeliveryAt);
+  assert.equal(state.staffing.pilots, beforePilots);
+  assert.equal(state.staffing.cabinCrew, beforeCabin + 4);
+  E.processCrewPipeline(state, finalDeliveryAt);
   assert.equal(state.staffing.pilots, beforePilots + 2);
   assert.equal(state.staffing.cabinCrew, beforeCabin + 4);
   assert.equal(state.staffing.pipeline.length, 0);
+});
+
+test('legacy saves without staffing are migrated from current fleet establishment', () => {
+  assert.equal(typeof E.ensureStaffing, 'function');
+  const state = E.newGame('Legacy Crew Air', 'CDG', 1406);
+  state.fleet = [
+    { id: 'AC1', typeId: 'A350-1000', status: 'ACTIVE' },
+    { id: 'AC2', typeId: 'A350-1000', status: 'ACTIVE' },
+  ];
+  delete state.staffing;
+  const staffing = E.ensureStaffing(state);
+  assert.ok(staffing.pilots > 12);
+  assert.ok(staffing.cabinCrew > 24);
+  assert.ok(Array.isArray(staffing.pipeline));
+  assert.equal(staffing.pipeline.length, 0);
 });
