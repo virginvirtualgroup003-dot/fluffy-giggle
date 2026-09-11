@@ -596,7 +596,7 @@ function validateRoutePlan({ originId, destId, aircraftTypeId, departMinute }) {
 
 const MAX_AIRCRAFT_SERVICE_HOURS_PER_DAY = 16;
 
-function buildOperationalPlan(state, route, fromMs, toMs, rng = Math.random) {
+function buildOperationalPlan(state, route, fromMs, toMs, rng = Math.random, sharedCrewLedger = null) {
   const type = aircraftType(route.aircraftTypeId);
   const distanceKm = distanceBetween(route.originId, route.destId);
   const blockH = blockTimeHours(distanceKm, type.cruiseKmh);
@@ -622,7 +622,6 @@ function buildOperationalPlan(state, route, fromMs, toMs, rng = Math.random) {
     f.assignedRouteId === route.id && f.status === 'ACTIVE' && f.typeId === route.aircraftTypeId
   );
   const elapsedDays = Math.max(0, (toMs - fromMs) / DAY_MS);
-  // The second turnaround reserves the tail at origin before its next planned rotation.
   const serviceHoursPerRotation = blockH * 2 + turnaroundH * 2;
   const capacityHours = assigned.length * MAX_AIRCRAFT_SERVICE_HOURS_PER_DAY * elapsedDays;
   const utilizationCapacityRotations = serviceHoursPerRotation > 0
@@ -631,14 +630,20 @@ function buildOperationalPlan(state, route, fromMs, toMs, rng = Math.random) {
   const candidateRotations = legalRotations.slice(0, utilizationCapacityRotations);
   const utilizationCancelledRotations = Math.max(0, legalRotations.length - candidateRotations.length);
   const avgCondition = assigned.length ? assigned.reduce((sum, f) => sum + f.condition, 0) / assigned.length : 0;
+  const crewLedger = sharedCrewLedger || createCrewPeriodLedger(state, fromMs, toMs);
 
   const outboundDepartureTimes = [];
   const returnDepartureTimes = [];
   const operatedDepartureTimes = [];
   let technicalCancelledRotations = 0;
+  let crewCancelledRotations = 0;
   let delayedFlights = 0;
 
   candidateRotations.forEach(rotation => {
+    if (!reserveCrewForRotation(crewLedger, type, blockH)) {
+      crewCancelledRotations += 1;
+      return;
+    }
     const congestion = (
       airportCongestionFactor(route.originId, rotation.outboundDeparture) +
       airportCongestionFactor(route.destId, rotation.outboundArrival) +
@@ -648,7 +653,6 @@ function buildOperationalPlan(state, route, fromMs, toMs, rng = Math.random) {
     const cancellationRisk = clamp(0.0015 + Math.max(0, 75 - avgCondition) * 0.0008 + congestion * 0.0045, 0.0015, 0.08);
     const delayRisk = clamp(0.025 + congestion * 0.13 + Math.max(0, 85 - avgCondition) * 0.002, 0.03, 0.40);
 
-    // If the outbound rotation is cancelled, the paired return sector cannot exist either.
     if (rng() < cancellationRisk) {
       technicalCancelledRotations += 1;
       return;
@@ -663,7 +667,7 @@ function buildOperationalPlan(state, route, fromMs, toMs, rng = Math.random) {
 
   const scheduledRotations = scheduledRotationStarts.length;
   const operatedRotations = outboundDepartureTimes.length;
-  const cancelledRotations = curfewRotations + utilizationCancelledRotations + technicalCancelledRotations;
+  const cancelledRotations = curfewRotations + utilizationCancelledRotations + technicalCancelledRotations + crewCancelledRotations;
 
   return {
     scheduledRotations,
@@ -676,6 +680,7 @@ function buildOperationalPlan(state, route, fromMs, toMs, rng = Math.random) {
     curfewCancellations: curfewRotations * 2,
     utilizationCancellations: utilizationCancelledRotations * 2,
     technicalCancellations: technicalCancelledRotations * 2,
+    crewCancellations: crewCancelledRotations * 2,
     outboundDepartureTimes,
     returnDepartureTimes,
     operatedDepartureTimes: operatedDepartureTimes.sort((a, b) => a - b),
@@ -716,6 +721,7 @@ function newGame(companyName, homeBaseId, rngSeed) {
     routes: [],
     orders: [], // pending aircraft deliveries
     operations: { activeFlights: 0, completedFlights: 0, cancelledFlights: 0, delayedFlights: 0, totalPassengers: 0, activeFlightWindows: [], slotAllocations: [] },
+    staffing: { pilots: CREW_DEFAULTS.pilots, cabinCrew: CREW_DEFAULTS.cabinCrew, reserveFraction: CREW_DEFAULTS.reserveFraction, pipeline: [] },
     finance: {
       loans: [],
       leaseDeposits: 0,
@@ -1187,6 +1193,139 @@ const SCHEDULED_CHECK_INTERVAL_HOURS = 650;
 const SCHEDULED_CHECK_INTERVAL_CYCLES = 400;
 const SCHEDULED_CHECK_DURATION_HOURS = 18;
 
+
+const CREW_DEFAULTS = {
+  pilots: 12,
+  cabinCrew: 24,
+  reserveFraction: 0.15,
+  pilotRecruitmentDays: 56,
+  cabinRecruitmentDays: 28,
+  pilotRecruitmentCostUSD: 15000,
+  cabinRecruitmentCostUSD: 4000,
+};
+
+function ensureStaffing(state) {
+  if (!state.staffing) {
+    state.staffing = {
+      pilots: CREW_DEFAULTS.pilots,
+      cabinCrew: CREW_DEFAULTS.cabinCrew,
+      reserveFraction: CREW_DEFAULTS.reserveFraction,
+      pipeline: [],
+    };
+  }
+  if (!Array.isArray(state.staffing.pipeline)) state.staffing.pipeline = [];
+  if (!Number.isFinite(state.staffing.reserveFraction)) state.staffing.reserveFraction = CREW_DEFAULTS.reserveFraction;
+  return state.staffing;
+}
+
+function crewLegalLimits(elapsedMs) {
+  const days = Math.max(0, elapsedMs / DAY_MS);
+  if (!days) return { dutyHoursPerPerson: 0, flightHoursPerPerson: 0 };
+  // ORO.FTL.210 ceilings: 60 duty h/7d, 110/14d, 190/28d, and 100 flight h/28d.
+  // The 28-day limits are prorated as a planning envelope to avoid scheduling the whole
+  // rolling allowance into a single short period; daily FDP limits remain modeled separately.
+  const dutyHoursPerPerson = Math.min(
+    60 * Math.max(1, days / 7),
+    110 * Math.max(1, days / 14),
+    190 * Math.max(1, days / 28),
+    (190 / 28) * days,
+  );
+  const flightHoursPerPerson = Math.min(100, (100 / 28) * days);
+  return { dutyHoursPerPerson, flightHoursPerPerson };
+}
+
+function crewCapacityForPeriod(state, fromMs, toMs) {
+  const staffing = ensureStaffing(state);
+  const elapsed = Math.max(0, toMs - fromMs);
+  const legal = crewLegalLimits(elapsed);
+  const schedulableShare = clamp(1 - staffing.reserveFraction, 0.5, 1);
+  return {
+    pilotDutyHours: staffing.pilots * schedulableShare * legal.dutyHoursPerPerson,
+    pilotFlightHours: staffing.pilots * schedulableShare * legal.flightHoursPerPerson,
+    cabinDutyHours: staffing.cabinCrew * schedulableShare * legal.dutyHoursPerPerson,
+    cabinFlightHours: staffing.cabinCrew * schedulableShare * legal.flightHoursPerPerson,
+  };
+}
+
+function crewRequirementForRotation(type, blockHoursPerSector) {
+  const base = minimumOperatingCrew(type);
+  const flightHours = blockHoursPerSector * 2;
+  const dutyHours = flightHours + ((type.turnaround || 30) / 60) * 2 + 1.25;
+  let pilots = base.flightDeck;
+  if (dutyHours > 15) pilots = Math.max(pilots, 4);
+  else if (dutyHours > 12.5) pilots = Math.max(pilots, 3);
+  let cabin = base.cabin;
+  if (dutyHours > 14) cabin = Math.ceil(cabin * 1.25);
+  return {
+    pilots,
+    cabin,
+    dutyHours,
+    flightHours,
+    pilotDutyHours: pilots * dutyHours,
+    pilotFlightHours: pilots * flightHours,
+    cabinDutyHours: cabin * dutyHours,
+    cabinFlightHours: cabin * flightHours,
+  };
+}
+
+function createCrewPeriodLedger(state, fromMs, toMs) {
+  const capacity = crewCapacityForPeriod(state, fromMs, toMs);
+  return {
+    ...capacity,
+    usedPilotDutyHours: 0,
+    usedPilotFlightHours: 0,
+    usedCabinDutyHours: 0,
+    usedCabinFlightHours: 0,
+  };
+}
+
+function reserveCrewForRotation(ledger, type, blockHoursPerSector) {
+  if (!ledger || !type) return false;
+  const req = crewRequirementForRotation(type, blockHoursPerSector);
+  const fits =
+    ledger.usedPilotDutyHours + req.pilotDutyHours <= ledger.pilotDutyHours + 1e-9 &&
+    ledger.usedPilotFlightHours + req.pilotFlightHours <= ledger.pilotFlightHours + 1e-9 &&
+    ledger.usedCabinDutyHours + req.cabinDutyHours <= ledger.cabinDutyHours + 1e-9 &&
+    ledger.usedCabinFlightHours + req.cabinFlightHours <= ledger.cabinFlightHours + 1e-9;
+  if (!fits) return false;
+  ledger.usedPilotDutyHours += req.pilotDutyHours;
+  ledger.usedPilotFlightHours += req.pilotFlightHours;
+  ledger.usedCabinDutyHours += req.cabinDutyHours;
+  ledger.usedCabinFlightHours += req.cabinFlightHours;
+  return true;
+}
+
+function actionHireCrew(state, { pilots = 0, cabinCrew = 0 } = {}) {
+  const s = structuredCloneLite(state);
+  const staffing = ensureStaffing(s);
+  const pilotCount = Math.max(0, Math.floor(pilots || 0));
+  const cabinCount = Math.max(0, Math.floor(cabinCrew || 0));
+  if (!pilotCount && !cabinCount) return { state: s, error: 'Aucun recrutement demandé.' };
+  const cost = pilotCount * CREW_DEFAULTS.pilotRecruitmentCostUSD + cabinCount * CREW_DEFAULTS.cabinRecruitmentCostUSD;
+  if (s.company.cash < cost) return { state: s, error: 'Trésorerie insuffisante pour le recrutement et la qualification.' };
+  const nowMs = s.meta?.lastProcessedAt || Date.now();
+  const leadDays = Math.max(
+    pilotCount ? CREW_DEFAULTS.pilotRecruitmentDays : 0,
+    cabinCount ? CREW_DEFAULTS.cabinRecruitmentDays : 0,
+  );
+  s.company.cash -= cost;
+  staffing.pipeline.push({ pilots: pilotCount, cabinCrew: cabinCount, cost, orderedAt: nowMs, availableAt: nowMs + leadDays * DAY_MS });
+  addLedger(s, s.meta.week, 'CREW_RECRUITMENT', -cost, 'Recrutement, contrôles et qualification équipage');
+  return { state: s, error: null };
+}
+
+function processCrewPipeline(state, nowMs) {
+  const staffing = ensureStaffing(state);
+  staffing.pipeline = staffing.pipeline.filter(batch => {
+    if (batch.availableAt > nowMs) return true;
+    staffing.pilots += batch.pilots || 0;
+    staffing.cabinCrew += batch.cabinCrew || 0;
+    state.log.push({ week: state.meta.week, type: 'CREW', text: 'Nouveaux équipages qualifiés et disponibles pour le planning.' });
+    return false;
+  });
+  return staffing;
+}
+
 function minimumOperatingCrew(type) {
   const flightDeck = 2;
   const cabin = Math.max(1, Math.ceil(type.seats / 50));
@@ -1271,7 +1410,7 @@ function passengerDisruptionCost(state, route, plan, bookedPassengers) {
   const affectedPassengers = bookedPassengers * cancelledShare;
   const controllableCancelled = Math.min(
     plan.cancelledFlights,
-    (plan.technicalCancellations || 0) + (plan.utilizationCancellations || 0) + (plan.curfewCancellations || 0),
+    (plan.technicalCancellations || 0) + (plan.utilizationCancellations || 0) + (plan.crewCancellations || 0) + (plan.curfewCancellations || 0),
   );
   const eligiblePassengers = bookedPassengers * clamp(controllableCancelled / plan.scheduledFlights, 0, 1);
   const distanceKm = distanceBetween(route.originId, route.destId);
@@ -1309,17 +1448,21 @@ function v3ProcessRecurringCosts(state, elapsedMs) {
   const days = elapsedMs / DAY_MS;
   const activeRoutes = state.routes.filter(r => r.status === 'ACTIVE').length;
   const aircraftCount = state.fleet.length;
+  const staffing = ensureStaffing(state);
 
-  // Labor is modeled as a continuous operating expense rather than a weekly click.
-  const labor =
-    (AERODESK_V3.laborDailyBaseUSD +
-      aircraftCount * AERODESK_V3.laborPerAircraftDailyUSD +
-      activeRoutes * AERODESK_V3.laborPerRouteDailyUSD) * days;
+  // Loaded payroll: flight/cabin crew now scale with actual establishment rather than being
+  // conjured per flight. Ground/administrative labor remains a compact fleet/network proxy.
+  const flightCrewPayroll = staffing.pilots * 420 * days;
+  const cabinCrewPayroll = staffing.cabinCrew * 190 * days;
+  const groundAndAdmin = (
+    AERODESK_V3.laborDailyBaseUSD +
+    aircraftCount * AERODESK_V3.laborPerAircraftDailyUSD +
+    activeRoutes * AERODESK_V3.laborPerRouteDailyUSD
+  ) * days;
+  const labor = flightCrewPayroll + cabinCrewPayroll + groundAndAdmin;
 
-  // Insurance is tied to the current fleet replacement value.
   const insuredValue = fleetValue(state);
-  const insurance =
-    insuredValue * AERODESK_V3.insuranceAnnualRate * days / 365;
+  const insurance = insuredValue * AERODESK_V3.insuranceAnnualRate * days / 365;
 
   v3BookAccounting(state, 'laborExpense', labor);
   v3BookAccounting(state, 'insuranceExpense', insurance);
@@ -1411,6 +1554,7 @@ function realTimeTick(prevState, nowMs = Date.now()) {
 
     updateMacroRealTime(state, rng, elapsed);
     processDeliveriesRealTime(state, next);
+    processCrewPipeline(state, next);
     processRealTimeDay(state, cursor, next, rng);
     cursor = next;
   }
@@ -1445,9 +1589,11 @@ function directionalServiceShares(plan, publishedFrequency) {
 function processRealTimeDay(state, fromMs, toMs, rng) {
   const elapsed = toMs - fromMs;
   restoreMaintenanceRealTime(state, toMs);
+  ensureStaffing(state);
+  const crewLedger = createCrewPeriodLedger(state, fromMs, toMs);
   const routeOperationalPlans = {};
   state.routes.filter(r => r.status === 'ACTIVE').forEach(r => {
-    routeOperationalPlans[r.id] = buildOperationalPlan(state, r, fromMs, toMs, rng);
+    routeOperationalPlans[r.id] = buildOperationalPlan(state, r, fromMs, toMs, rng, crewLedger);
   });
   const periodOps = { scheduledFlights: 0, operatedFlights: 0, cancelledFlights: 0, delayedFlights: 0 };
   const marketKeys = new Set();
