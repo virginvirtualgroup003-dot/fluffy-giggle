@@ -1,3 +1,10 @@
+/*
+  AERODESK V3 - REAL-TIME AIRLINE SIMULATOR
+  Built from the supplied aerodesk.jsx and the realtime engine.
+  The simulation clock advances from wall-clock timestamps; there is no
+  "advance one week" action. Economic parameters are simulation assumptions,
+  not claims of live market data.
+*/
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   LineChart, Line, AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid,
@@ -14,8 +21,8 @@ import {
 // Pure logic module. No UI. No I/O besides pure functions on a state object.
 // Reference-data provenance (see rule "no fake data presented as real"):
 //   - Airport coordinates: DERIVED (approximate public geographic knowledge)
-//   - Aircraft specs: DERIVED (approximate, rounded public general-knowledge figures,
-//     NOT manufacturer-certified performance data)
+//   - Aircraft models/specs: real aircraft families with rounded manufacturer figures.
+//     Acquisition and lease values are modeled because airline transaction prices are not public.
 //   - Airport size/tourist/vfr/corporate indices: SYNTHETIC (invented for balance)
 //   - Demand, pricing, competitor behavior: MODELED (game economy, not real stats)
 // =============================================================================
@@ -52,14 +59,20 @@ const AIRPORTS = [
 ];
 
 const AIRCRAFT_TYPES = [
-  { id: 'TB70', name: 'TurboRégional 70', category: 'TURBOPROP', seats: 70, rangeKm: 1500, cruiseKmh: 510, cruiseBurn: 700, fixedBurn: 150, price: 28e6, leaseWeekly: 58000, crew: 4, maintPerHour: 900, turnaround: 25, noise: 35, runway: 1200 },
-  { id: 'RJ90', name: 'JetRégional 90', category: 'REGIONAL_JET', seats: 90, rangeKm: 2600, cruiseKmh: 830, cruiseBurn: 1900, fixedBurn: 500, price: 42e6, leaseWeekly: 95000, crew: 5, maintPerHour: 1500, turnaround: 35, noise: 55, runway: 1800 },
-  { id: 'NB180', name: 'MonoCouloir 180', category: 'NARROWBODY', seats: 180, rangeKm: 6300, cruiseKmh: 840, cruiseBurn: 2500, fixedBurn: 700, price: 112e6, leaseWeekly: 285000, crew: 6, maintPerHour: 1900, turnaround: 40, noise: 62, runway: 2100 },
-  { id: 'NB220XR', name: 'MonoCouloir 220 XR', category: 'NARROWBODY_XR', seats: 220, rangeKm: 7400, cruiseKmh: 840, cruiseBurn: 2650, fixedBurn: 750, price: 132e6, leaseWeekly: 330000, crew: 7, maintPerHour: 2100, turnaround: 45, noise: 63, runway: 2200 },
-  { id: 'WB300', name: 'BiCouloir 300', category: 'WIDEBODY_MED', seats: 296, rangeKm: 13500, cruiseKmh: 900, cruiseBurn: 5900, fixedBurn: 1600, price: 292e6, leaseWeekly: 655000, crew: 11, maintPerHour: 3600, turnaround: 90, noise: 58, runway: 2600 },
-  { id: 'WB330', name: 'BiCouloir 330', category: 'WIDEBODY_LARGE', seats: 325, rangeKm: 15000, cruiseKmh: 905, cruiseBurn: 6400, fixedBurn: 1700, price: 318e6, leaseWeekly: 705000, crew: 12, maintPerHour: 3850, turnaround: 95, noise: 57, runway: 2700 },
-  { id: 'WB400', name: 'BiCouloir 400', category: 'WIDEBODY_XL', seats: 396, rangeKm: 13600, cruiseKmh: 910, cruiseBurn: 7600, fixedBurn: 1950, price: 376e6, leaseWeekly: 830000, crew: 14, maintPerHour: 4400, turnaround: 110, noise: 68, runway: 3000 },
-  { id: 'WBULR', name: 'BiCouloir ULR', category: 'WIDEBODY_ULR', seats: 250, rangeKm: 17000, cruiseKmh: 905, cruiseBurn: 6100, fixedBurn: 1650, price: 335e6, leaseWeekly: 745000, crew: 13, maintPerHour: 3950, turnaround: 100, noise: 56, runway: 2800 },
+  // Real aircraft families. Performance figures are rounded from manufacturer data;
+  // acquisition/lease figures remain modeled because transaction prices are confidential.
+  { id: 'ATR72-600', name: 'ATR 72-600', manufacturer: 'ATR', category: 'TURBOPROP', seats: 72, rangeKm: 1528, cruiseKmh: 510, cruiseBurn: 280, fixedBurn: 70, price: 27e6, leaseWeekly: 62000, crew: 4, maintPerHour: 1150, turnaround: 25, noise: 68, runway: 1330 },
+  { id: 'E190-E2', name: 'Embraer E190-E2', manufacturer: 'Embraer', category: 'REGIONAL_JET', seats: 114, rangeKm: 5280, cruiseKmh: 829, cruiseBurn: 1500, fixedBurn: 420, price: 60e6, leaseWeekly: 125000, crew: 5, maintPerHour: 1550, turnaround: 35, noise: 62, runway: 1800 },
+  { id: 'A220-300', name: 'Airbus A220-300', manufacturer: 'Airbus', category: 'NARROWBODY', seats: 145, rangeKm: 6297, cruiseKmh: 870, cruiseBurn: 2150, fixedBurn: 560, price: 82e6, leaseWeekly: 175000, crew: 5, maintPerHour: 1750, turnaround: 35, noise: 58, runway: 1900 },
+  { id: 'A320neo', name: 'Airbus A320neo', manufacturer: 'Airbus', category: 'NARROWBODY', seats: 180, rangeKm: 6300, cruiseKmh: 840, cruiseBurn: 2500, fixedBurn: 700, price: 111e6, leaseWeekly: 235000, crew: 6, maintPerHour: 1950, turnaround: 40, noise: 60, runway: 2100 },
+  { id: 'A321neo', name: 'Airbus A321neo', manufacturer: 'Airbus', category: 'NARROWBODY', seats: 206, rangeKm: 7400, cruiseKmh: 840, cruiseBurn: 2750, fixedBurn: 760, price: 130e6, leaseWeekly: 275000, crew: 6, maintPerHour: 2150, turnaround: 42, noise: 61, runway: 2200 },
+  { id: 'A321XLR', name: 'Airbus A321XLR', manufacturer: 'Airbus', category: 'NARROWBODY_XR', seats: 206, rangeKm: 8700, cruiseKmh: 840, cruiseBurn: 2800, fixedBurn: 780, price: 145e6, leaseWeekly: 305000, crew: 6, maintPerHour: 2250, turnaround: 45, noise: 61, runway: 2200 },
+  { id: '737-8', name: 'Boeing 737-8', manufacturer: 'Boeing', category: 'NARROWBODY', seats: 178, rangeKm: 6480, cruiseKmh: 839, cruiseBurn: 2450, fixedBurn: 690, price: 121e6, leaseWeekly: 245000, crew: 6, maintPerHour: 1950, turnaround: 40, noise: 60, runway: 2100 },
+  { id: '787-9', name: 'Boeing 787-9', manufacturer: 'Boeing', category: 'WIDEBODY_MED', seats: 296, rangeKm: 14100, cruiseKmh: 903, cruiseBurn: 5700, fixedBurn: 1500, price: 292e6, leaseWeekly: 610000, crew: 10, maintPerHour: 3600, turnaround: 85, noise: 58, runway: 2600 },
+  { id: 'A330-900', name: 'Airbus A330-900', manufacturer: 'Airbus', category: 'WIDEBODY_LARGE', seats: 287, rangeKm: 13334, cruiseKmh: 905, cruiseBurn: 6100, fixedBurn: 1600, price: 300e6, leaseWeekly: 640000, crew: 11, maintPerHour: 3700, turnaround: 90, noise: 59, runway: 2600 },
+  { id: 'A350-900', name: 'Airbus A350-900', manufacturer: 'Airbus', category: 'WIDEBODY_LARGE', seats: 325, rangeKm: 15000, cruiseKmh: 903, cruiseBurn: 6300, fixedBurn: 1650, price: 317e6, leaseWeekly: 680000, crew: 12, maintPerHour: 3900, turnaround: 95, noise: 56, runway: 2600 },
+  { id: 'A350-1000', name: 'Airbus A350-1000', manufacturer: 'Airbus', category: 'WIDEBODY_XL', seats: 369, rangeKm: 16100, cruiseKmh: 903, cruiseBurn: 7000, fixedBurn: 1800, price: 366e6, leaseWeekly: 780000, crew: 13, maintPerHour: 4300, turnaround: 100, noise: 57, runway: 2800 },
+  { id: '777-9', name: 'Boeing 777-9', manufacturer: 'Boeing', category: 'WIDEBODY_XL', seats: 426, rangeKm: 13900, cruiseKmh: 905, cruiseBurn: 7900, fixedBurn: 2000, price: 442e6, leaseWeekly: 930000, crew: 14, maintPerHour: 4700, turnaround: 110, noise: 63, runway: 3000 },
 ];
 
 const SEGMENTS = ['BUSINESS', 'LEISURE', 'VFR'];
@@ -173,6 +186,42 @@ function segmentBasePotential(o, d, distanceKm, seg, weekOfYear, macro) {
 }
 
 // -----------------------------------------------------------------------------
+// REAL-TIME CLOCK + CALENDAR
+// -----------------------------------------------------------------------------
+const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+function getISOWeek(date) {
+  const d = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+  const day = d.getUTCDay() || 7;
+  d.setUTCDate(d.getUTCDate() + 4 - day);
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+  return Math.ceil((((d - yearStart) / DAY_MS) + 1) / 7);
+}
+
+function scheduledDeparturesBetween(route, fromMs, toMs) {
+  let count = 0;
+  const start = new Date(fromMs);
+  start.setHours(0, 0, 0, 0);
+  const end = new Date(toMs);
+  end.setHours(0, 0, 0, 0);
+  for (let d = new Date(start); d <= end; d = new Date(d.getTime() + DAY_MS)) {
+    const dow = d.getDay();
+    (route.schedule || []).forEach(slot => {
+      if (slot.dayOfWeek !== dow) return;
+      const departure = new Date(d);
+      departure.setHours(Math.floor(slot.minute / 60), slot.minute % 60, 0, 0);
+      if (departure.getTime() > fromMs && departure.getTime() <= toMs) count += 1;
+    });
+  }
+  return count;
+}
+
+function prorateWeekly(value, elapsedMs) {
+  return value * (elapsedMs / WEEK_MS);
+}
+
+// -----------------------------------------------------------------------------
 // 4. NEW GAME
 // -----------------------------------------------------------------------------
 
@@ -187,7 +236,7 @@ function newGame(companyName, homeBaseId, rngSeed) {
 
   return {
     version: 3,
-    meta: { week: 1, year: 1, weekOfYear: 1, createdAt: Date.now(), rngSeed: rngSeed || Date.now() % 100000 },
+    meta: { week: 1, year: new Date().getUTCFullYear(), weekOfYear: getISOWeek(new Date()), createdAt: Date.now(), lastProcessedAt: Date.now(), currentTime: new Date().toISOString(), rngSeed: rngSeed || Date.now() % 100000, realTime: true },
     company: {
       name: companyName, homeBase: homeBaseId, cash: 45e6, reputation: 50, otp: 88,
       founded: true, bankrupt: false, nextAircraftSerial: 1, nextRouteSerial: 1,
@@ -200,6 +249,21 @@ function newGame(companyName, homeBaseId, rngSeed) {
       cashHistory: [{ week: 0, cash: 45e6 }],
       plHistory: [],
       ledgerRecent: [],
+      accounting: {
+        passengerRevenue: 0,
+        ancillaryRevenue: 0,
+        fuelExpense: 0,
+        laborExpense: 0,
+        maintenanceExpense: 0,
+        airportExpense: 0,
+        handlingExpense: 0,
+        distributionExpense: 0,
+        leasingExpense: 0,
+        insuranceExpense: 0,
+        overheadExpense: 0,
+        interestExpense: 0,
+        taxesExpense: 0,
+      },
     },
     market: {
       competitors,
@@ -461,55 +525,195 @@ function addLedger(state, week, category, amount, note) {
 // 8. WEEKLY TICK
 // -----------------------------------------------------------------------------
 
-function weeklyTick(prevState) {
+
+/* =========================
+   AERODESK V3 ECONOMIC LAYER
+   ========================= */
+
+const AERODESK_V3 = {
+  ancillaryRate: 0.14,
+  laborDailyBaseEUR: 1800,
+  laborPerAircraftDailyEUR: 520,
+  laborPerRouteDailyEUR: 180,
+  insuranceAnnualRate: 0.008,
+  carbonEURPerTonneCO2: 90,
+  co2KgPerLiterJetA: 3.16,
+  airportInflationAnnual: 0.025,
+};
+
+function v3EnsureFinance(state) {
+  state.finance = state.finance || {};
+  state.finance.accounting = state.finance.accounting || {};
+  return state.finance.accounting;
+}
+
+function v3BookAccounting(state, bucket, amount) {
+  const accounting = v3EnsureFinance(state);
+  accounting[bucket] = (accounting[bucket] || 0) + amount;
+}
+
+function v3ProcessRecurringCosts(state, elapsedMs) {
+  const days = elapsedMs / DAY_MS;
+  const activeRoutes = state.routes.filter(r => r.status === 'ACTIVE').length;
+  const aircraftCount = state.fleet.length;
+
+  // Labor is modeled as a continuous operating expense rather than a weekly click.
+  const labor =
+    (AERODESK_V3.laborDailyBaseEUR +
+      aircraftCount * AERODESK_V3.laborPerAircraftDailyEUR +
+      activeRoutes * AERODESK_V3.laborPerRouteDailyEUR) * days;
+
+  // Insurance is tied to the current fleet replacement value.
+  const insuredValue = fleetValue(state);
+  const insurance =
+    insuredValue * AERODESK_V3.insuranceAnnualRate * days / 365;
+
+  state.company.cash -= labor + insurance;
+
+  v3BookAccounting(state, 'laborExpense', labor);
+  v3BookAccounting(state, 'insuranceExpense', insurance);
+
+  addLedger(state, state.meta.week, 'LABOR', -labor, 'Personnel et charges opérationnelles');
+  addLedger(state, state.meta.week, 'INSURANCE', -insurance, 'Assurance flotte');
+
+  return state;
+}
+
+function v3AddAncillaryRevenue(state, passengerRevenue) {
+  const ancillary = passengerRevenue * AERODESK_V3.ancillaryRate;
+  state.company.cash += ancillary;
+  v3BookAccounting(state, 'ancillaryRevenue', ancillary);
+  return ancillary;
+}
+
+function v3ApplyCarbonCost(state, fuelLiters) {
+  const tonnesCO2 = fuelLiters * AERODESK_V3.co2KgPerLiterJetA / 1000;
+  const cost = tonnesCO2 * AERODESK_V3.carbonEURPerTonneCO2;
+  state.company.cash -= cost;
+  v3BookAccounting(state, 'taxesExpense', cost);
+  return cost;
+}
+
+function v3GetPnl(state) {
+  const a = v3EnsureFinance(state);
+  const revenue =
+    (a.passengerRevenue || 0) +
+    (a.ancillaryRevenue || 0);
+
+  const expenses =
+    (a.fuelExpense || 0) +
+    (a.laborExpense || 0) +
+    (a.maintenanceExpense || 0) +
+    (a.airportExpense || 0) +
+    (a.handlingExpense || 0) +
+    (a.distributionExpense || 0) +
+    (a.leasingExpense || 0) +
+    (a.insuranceExpense || 0) +
+    (a.overheadExpense || 0) +
+    (a.interestExpense || 0) +
+    (a.taxesExpense || 0);
+
+  return {
+    revenue,
+    expenses,
+    operatingResult: revenue - expenses,
+    margin: revenue > 0 ? ((revenue - expenses) / revenue) * 100 : 0,
+  };
+}
+
+function v3RefreshOperationalCounters(state) {
+  state.operations = state.operations || {};
+  state.operations.activeFlights = state.operations.activeFlights || 0;
+  state.operations.completedFlights = state.operations.completedFlights || 0;
+  state.operations.cancelledFlights = state.operations.cancelledFlights || 0;
+  state.operations.delayedFlights = state.operations.delayedFlights || 0;
+  state.operations.totalPassengers = state.operations.totalPassengers || 0;
+  return state;
+}
+
+function realTimeTick(prevState, nowMs = Date.now()) {
   const state = structuredCloneLite(prevState);
-  const rng = seededRandom(state.meta.rngSeed + state.meta.week);
-  state.meta.week += 1;
-  state.meta.weekOfYear = ((state.meta.weekOfYear) % 52) + 1;
-  if (state.meta.weekOfYear === 1) state.meta.year += 1;
+  const previousMs = state.meta.lastProcessedAt || nowMs;
+  if (nowMs <= previousMs) return state;
 
-  updateMacro(state, rng);
-  processDeliveries(state);
-  processMaintenance(state, rng);
+  // Do not invent a week jump: process only the elapsed real-world time.
+  // When the app was closed, the same elapsed period is caught up on resume.
+  let cursor = previousMs;
+  const maxCatchupMs = 365 * DAY_MS;
+  const target = Math.min(nowMs, previousMs + maxCatchupMs);
 
-  // ---- collect all markets with at least one offer (player or competitor) ----
+  while (cursor < target) {
+    const next = Math.min(target, cursor + DAY_MS);
+    const elapsed = next - cursor;
+    const dayDate = new Date(next);
+    const rng = seededRandom(Math.floor(next / DAY_MS) + state.meta.rngSeed);
+    state.meta.week = getISOWeek(dayDate);
+    state.meta.year = dayDate.getUTCFullYear();
+    state.meta.weekOfYear = getISOWeek(dayDate);
+
+    updateMacroRealTime(state, rng, elapsed);
+    processDeliveriesRealTime(state, next);
+    processRealTimeDay(state, cursor, next, rng);
+    cursor = next;
+  }
+
+  state.meta.lastProcessedAt = target;
+  state.meta.currentTime = new Date(target).toISOString();
+  state.meta.totalRealTimeHours = (state.meta.totalRealTimeHours || 0) + (target - previousMs) / 3600000;
+  checkBankruptcy(state);
+  return state;
+}
+
+function processRealTimeDay(state, fromMs, toMs, rng) {
+  const elapsed = toMs - fromMs;
   const marketKeys = new Set();
   state.routes.filter(r => r.status === 'ACTIVE').forEach(r => {
     marketKeys.add(r.originId + '|' + r.destId);
-    state.routes.filter(r2 => r2.status === 'ACTIVE' && r2.originId === r.destId).forEach(r2 => {
-      marketKeys.add(r.originId + '|' + r2.destId);
-    });
+    state.routes.filter(r2 => r2.status === 'ACTIVE' && r2.originId === r.destId)
+      .forEach(r2 => marketKeys.add(r.originId + '|' + r2.destId));
   });
   state.market.competitors.forEach(c => c.routes.forEach(r => marketKeys.add(r.origin + '|' + r.dest)));
 
   const priorShareCache = state._priorShareCache || {};
   state._priorShareCache = {};
-
-  const routeRevenue = {}; // routeId -> revenue
+  const routeRevenue = {};
   const routePax = {};
   const compRouteRevenue = {};
 
   marketKeys.forEach(key => {
     const [oId, dId] = key.split('|');
-    const withCache = { ...state, _priorShareCache: priorShareCache };
-    const outcome = computeMarketOutcome(withCache, oId, dId, state.meta.weekOfYear);
+    const outcome = computeMarketOutcome({ ...state, _priorShareCache: priorShareCache }, oId, dId, state.meta.weekOfYear);
     if (!outcome) return;
     const totalPaxByOwner = {};
-    SEGMENTS.forEach(seg => {
-      outcome.segments[seg].products.forEach(e => {
-        const rev = e.pax * e.fare;
-        totalPaxByOwner[e.owner] = (totalPaxByOwner[e.owner] || 0) + e.pax;
-        if (e.owner === 'PLAYER') {
-          // attribute to the specific route key stored in product key
-          const routeKey = e.key.replace('P-', '');
-          routeRevenue[routeKey] = (routeRevenue[routeKey] || 0) + rev;
-          routePax[routeKey] = (routePax[routeKey] || 0) + e.pax;
-        } else if (e.owner.startsWith('AI:')) {
-          const cid = e.owner.slice(3);
-          compRouteRevenue[e.key] = (compRouteRevenue[e.key] || 0) + rev;
+    SEGMENTS.forEach(seg => outcome.segments[seg].products.forEach(e => {
+      totalPaxByOwner[e.owner] = (totalPaxByOwner[e.owner] || 0) + e.pax;
+      if (e.owner === 'PLAYER') {
+        const productKey = e.key.replace('P-', '');
+        const product = findPlayerProductByKey(state, oId, dId, productKey);
+        if (!product) return;
+        const freq = Math.max(1, product.freq);
+        const weeklyPax = e.pax;
+        const departures = product.legs === 1
+          ? scheduledDeparturesBetween(product.route, fromMs, toMs)
+          : Math.min(scheduledDeparturesBetween(product.route, fromMs, toMs), scheduledDeparturesBetween(product.secondRoute, fromMs, toMs));
+        const flightsShare = departures / freq;
+        const pax = weeklyPax * flightsShare;
+        const rev = pax * e.fare;
+        if (product.legs === 1) {
+          routeRevenue[product.route.id] = (routeRevenue[product.route.id] || 0) + rev;
+          routePax[product.route.id] = (routePax[product.route.id] || 0) + pax;
+        } else {
+          // A connecting itinerary generates revenue for both operating legs.
+          const split = rev / 2;
+          [product.route, product.secondRoute].forEach(leg => {
+            routeRevenue[leg.id] = (routeRevenue[leg.id] || 0) + split;
+            routePax[leg.id] = (routePax[leg.id] || 0) + pax;
+          });
         }
-      });
-    });
+      } else if (e.owner.startsWith('AI:')) {
+        compRouteRevenue[e.key] = (compRouteRevenue[e.key] || 0) + e.pax * e.fare;
+      }
+    }));
     const totalMarketPax = Object.values(totalPaxByOwner).reduce((a, b) => a + b, 0) || 1;
     state._priorShareCache[key] = {};
     Object.keys(totalPaxByOwner).forEach(owner => {
@@ -517,108 +721,139 @@ function weeklyTick(prevState) {
     });
   });
 
-  // ---- apply player route economics ----
-  let weekRevenue = 0, weekCosts = 0;
-  const costBreakdown = { fuel: 0, crew: 0, maint: 0, airport: 0, handling: 0, leasing: 0, distribution: 0, insurance: 0, overhead: 0, interest: 0 };
+  let revenue = 0, costs = 0;
+  v3RefreshOperationalCounters(state);
+  v3ProcessRecurringCosts(state, elapsed);
+  const breakdown = { fuel: 0, crew: 0, maint: 0, airport: 0, handling: 0, leasing: 0, distribution: 0, insurance: 0, overhead: 0, interest: 0 };
 
   state.routes.forEach(route => {
     if (route.status !== 'ACTIVE') return;
     const type = aircraftType(route.aircraftTypeId);
     const dist = distanceBetween(route.originId, route.destId);
-    const revenue = routeRevenue[route.id] || 0;
+    const flights = scheduledDeparturesBetween(route, fromMs, toMs);
+    if (!flights) return;
     const pax = routePax[route.id] || 0;
-    const flights = route.frequencyPerWeek;
-    const fuelLiters = fuelBurnLiters(dist, type) * flights;
-    const fuelCost = fuelLiters * state.market.fuelPrice;
+    const routeRev = routeRevenueValue(routeRevenue, route.id);
+    const fuelCost = fuelBurnLiters(dist, type) * flights * state.market.fuelPrice;
     const blockH = blockTimeHours(dist, type.cruiseKmh) * flights;
     const crewCost = type.crew * 95 * blockH;
     const cond = avgConditionForRoute(state, route);
-    const ageMult = clamp(1.6 - cond / 100, 0.85, 1.6);
+    const ageMult = clamp(1.25 + (100 - cond) / 80, 1, 1.8);
     const maintCost = type.maintPerHour * blockH * ageMult;
     const sizeFactor = type.seats / 180;
-    const oFee = airport(route.originId).fee, dFee = airport(route.destId).fee;
-    const navFee = dist * 0.34;
-    const airportCost = ((oFee + dFee) / 3 * sizeFactor + navFee) * flights;
-    const handlingCost = pax * 10;
-    const distributionCost = revenue * 0.045;
-
-    weekRevenue += revenue;
+    const airportCost = ((airport(route.originId).fee + airport(route.destId).fee) / 3 * sizeFactor + dist * 0.34) * flights;
+    const handlingCost = pax * 12;
+    const distributionCost = routeRev * 0.045;
     const routeCost = fuelCost + crewCost + maintCost + airportCost + handlingCost + distributionCost;
-    weekCosts += routeCost;
-    costBreakdown.fuel += fuelCost;
-    costBreakdown.crew += crewCost;
-    costBreakdown.maint += maintCost;
-    costBreakdown.airport += airportCost;
-    costBreakdown.handling += handlingCost;
-    costBreakdown.distribution += distributionCost;
 
+    const ancillary = v3AddAncillaryRevenue(state, routeRev);
+    const carbonCost = v3ApplyCarbonCost(state, fuelBurnLiters(dist, type) * flights);
+
+    revenue += routeRev + ancillary;
+    costs += routeCost + carbonCost;
+    breakdown.fuel += fuelCost;
+    breakdown.crew += crewCost;
+    breakdown.maint += maintCost;
+    breakdown.airport += airportCost;
+    breakdown.handling += handlingCost;
+    breakdown.distribution += distributionCost;
+
+    const accounting = v3EnsureFinance(state);
+    accounting.passengerRevenue = (accounting.passengerRevenue || 0) + routeRev;
+    accounting.fuelExpense = (accounting.fuelExpense || 0) + fuelCost;
+    accounting.maintenanceExpense = (accounting.maintenanceExpense || 0) + maintCost;
+    accounting.airportExpense = (accounting.airportExpense || 0) + airportCost;
+    accounting.handlingExpense = (accounting.handlingExpense || 0) + handlingCost;
+    accounting.distributionExpense = (accounting.distributionExpense || 0) + distributionCost;
+
+    state.operations.totalPassengers += Math.round(pax);
+    state.operations.completedFlights += flights;
+
+    const loadFactor = flights ? pax / (type.seats * flights) : 0;
     route.history = route.history || [];
-    const loadFactor = flights > 0 ? pax / (type.seats * flights) : 0;
-    route.history.push({ week: state.meta.week, pax: Math.round(pax), revenue, cost: routeCost, loadFactor });
-    if (route.history.length > 30) route.history.splice(0, route.history.length - 30);
+    route.history.push({ time: new Date(toMs).toISOString(), week: state.meta.week, pax: Math.round(pax), revenue: routeRev, cost: routeCost, loadFactor });
+    if (route.history.length > 365) route.history.splice(0, route.history.length - 365);
+    if (route.fareStrategy === 'YIELD_OPTIMIZED') adaptYield(route, loadFactor);
 
-    if (route.fareStrategy === 'YIELD_OPTIMIZED') {
-      adaptYield(route, loadFactor);
-    }
+    const assigned = state.fleet.filter(f => f.assignedRouteId === route.id && f.status === 'ACTIVE');
+    assigned.forEach(f => {
+      f.flightHours = (f.flightHours || 0) + blockH;
+      f.cycles = (f.cycles || 0) + flights;
+      f.condition = clamp(f.condition - blockH * 0.035, 10, 100);
+      if (f.condition < 55 && rng() < 0.02) {
+        f.status = 'MAINTENANCE';
+        f.maintUntil = toMs + 2 * DAY_MS;
+        const eventCost = type.maintPerHour * 25;
+        state.company.cash -= eventCost;
+        addLedger(state, state.meta.week, 'MAINT_UNSCHEDULED', -eventCost, 'Maintenance non programmée');
+      }
+    });
   });
 
-  // leasing + insurance + overhead (fleet-wide, not per-route)
-  state.fleet.forEach(f => {
-    if (f.ownership === 'LEASED') {
-      const type = aircraftType(f.typeId);
-      costBreakdown.leasing += type.leaseWeekly;
-      weekCosts += type.leaseWeekly;
-    }
-  });
-  const fValue = fleetValue(state);
-  const insurance = fValue * 0.00013 + state.fleet.length * 150;
-  const overhead = 9000 + state.fleet.length * 900 + state.routes.filter(r => r.status === 'ACTIVE').length * 300;
-  costBreakdown.insurance = insurance;
-  costBreakdown.overhead = overhead;
-  weekCosts += insurance + overhead;
+  const fleetValueNow = fleetValue(state);
+  const insurance = 0;
+  const overhead = prorateWeekly(9000 + state.fleet.length * 900 + state.routes.filter(r => r.status === 'ACTIVE').length * 300, elapsed);
+  breakdown.insurance = insurance;
+  breakdown.overhead = overhead;
+  costs += overhead;
 
-  // loans
+  const accounting2 = v3EnsureFinance(state);
+  accounting2.overheadExpense = (accounting2.overheadExpense || 0) + overhead;
+
   let interestPaid = 0, principalPaid = 0;
   state.finance.loans = state.finance.loans.filter(loan => {
-    const interest = loan.principal * loan.weeklyRate;
-    const payment = Math.min(loan.weeklyPayment, loan.principal + interest);
-    const principal = payment - interest;
-    loan.principal -= principal;
-    interestPaid += interest; principalPaid += principal;
-    loan.remainingWeeks -= 1;
+    const interest = loan.principal * loan.weeklyRate * (elapsed / WEEK_MS);
+    const scheduledPrincipal = Math.min(loan.principal, Math.max(0, loan.weeklyPayment - loan.principal * loan.weeklyRate) * (elapsed / WEEK_MS));
+    loan.principal -= scheduledPrincipal;
+    interestPaid += interest; principalPaid += scheduledPrincipal;
+    loan.remainingWeeks = Math.max(0, loan.remainingWeeks - elapsed / WEEK_MS);
     return loan.principal > 1 && loan.remainingWeeks > 0;
   });
-  costBreakdown.interest = interestPaid;
-  weekCosts += interestPaid;
+  breakdown.interest = interestPaid;
+  costs += interestPaid;
+  const accounting3 = v3EnsureFinance(state);
+  accounting3.interestExpense = (accounting3.interestExpense || 0) + interestPaid;
 
-  state.company.cash += weekRevenue - weekCosts - principalPaid;
+  state.company.cash += revenue - costs - principalPaid;
+  const netIncome = revenue - costs;
+  state.finance.plHistory.push({ week: state.meta.week, time: new Date(toMs).toISOString(), revenue, costs, netIncome, breakdown });
+  if (state.finance.plHistory.length > 365) state.finance.plHistory.splice(0, state.finance.plHistory.length - 365);
+  state.finance.cashHistory.push({ week: state.meta.week, time: new Date(toMs).toISOString(), cash: state.company.cash });
+  if (state.finance.cashHistory.length > 730) state.finance.cashHistory.splice(0, state.finance.cashHistory.length - 730);
+  if (revenue || costs) {
+    addLedger(state, state.meta.week, 'REVENUE', revenue, 'Recettes en temps réel');
+    addLedger(state, state.meta.week, 'COSTS', -costs, 'Coûts en temps réel');
+  }
 
-  // reputation / OTP drift
-  updateReputationAndOtp(state, rng);
-
-  // finance history
-  const netIncome = weekRevenue - weekCosts;
-  state.finance.plHistory.push({ week: state.meta.week, revenue: weekRevenue, costs: weekCosts, netIncome, breakdown: costBreakdown });
-  if (state.finance.plHistory.length > 104) state.finance.plHistory.splice(0, state.finance.plHistory.length - 104);
-  state.finance.cashHistory.push({ week: state.meta.week, cash: state.company.cash });
-  if (state.finance.cashHistory.length > 208) state.finance.cashHistory.splice(0, state.finance.cashHistory.length - 208);
-
-  addLedger(state, state.meta.week, 'REVENUE', weekRevenue, 'Recettes réseau');
-  addLedger(state, state.meta.week, 'COSTS', -weekCosts, 'Coûts opérationnels');
-
-  // aging
-  state.fleet.forEach(f => { f.ageWeeks += 1; });
-
-  // competitor AI
+  state.fleet.forEach(f => { f.ageWeeks = (f.ageWeeks || 0) + elapsed / WEEK_MS; });
+  state.operations.activeFlights = state.routes.filter(r => r.status === 'ACTIVE').length;
   runCompetitorAI(state, rng, compRouteRevenue);
-
-  // random events
+  updateReputationAndOtp(state, rng);
   maybeTriggerEvent(state, rng);
+}
 
-  // bankruptcy check
-  checkBankruptcy(state);
+function routeRevenueValue(map, id) { return map[id] || 0; }
 
-  return state;
+function findPlayerProductByKey(state, originId, destId, key) {
+  return buildPlayerProducts(state, originId, destId).find(p => p.key === 'P-' + key);
+}
+
+function updateMacroRealTime(state, rng, elapsedMs) {
+  const days = elapsedMs / DAY_MS;
+  state.market.fuelPrice = clamp(state.market.fuelPrice * (1 + (rng() - 0.5) * 0.004 * days), 0.45, 3.0);
+  state.market.macro.demandIndex = clamp(state.market.macro.demandIndex + (rng() - 0.5) * 0.003 * days, 0.70, 1.30);
+}
+
+function processDeliveriesRealTime(state, nowMs) {
+  state.orders = state.orders.filter(o => {
+    if (!o.deliveryAt) o.deliveryAt = nowMs + Math.max(1, o.weeksLeft || 1) * 7 * DAY_MS;
+    if (o.deliveryAt <= nowMs) {
+      state.fleet.push({ id: 'AC' + (state.company.nextAircraftSerial++), typeId: o.typeId, ownership: o.ownership, ageWeeks: 0, cycles: 0, flightHours: 0, condition: 100, status: 'ACTIVE', assignedRouteId: null });
+      state.log.push({ week: state.meta.week, type: 'DELIVERY', text: `Livraison d'un ${aircraftType(o.typeId).name}.` });
+      return false;
+    }
+    return true;
+  });
 }
 
 function avgConditionForRoute(state, route) {
@@ -797,7 +1032,7 @@ function actionSuspendRoute(state, routeId) {
 function actionBuyAircraft(state, typeId, ownership) {
   const s = structuredCloneLite(state);
   const type = aircraftType(typeId);
-  const leadWeeks = ownership === 'LEASED' ? 2 : 5;
+  const leadDays = ownership === 'LEASED' ? 14 : 35;
   if (ownership === 'OWNED') {
     if (s.company.cash < type.price * 0.2) return { state: s, error: 'Trésorerie insuffisante pour un apport minimal.' };
     s.company.cash -= type.price * 0.2;
@@ -811,7 +1046,7 @@ function actionBuyAircraft(state, typeId, ownership) {
     };
     s.finance.loans.push(loan);
   }
-  s.orders.push({ typeId, ownership, weeksLeft: leadWeeks });
+  s.orders.push({ typeId, ownership, weeksLeft: leadDays / 7, deliveryAt: Date.now() + leadDays * DAY_MS });
   return { state: s, error: null };
 }
 
@@ -826,7 +1061,7 @@ function actionAssignAircraft(state, aircraftId, routeId) {
 // UI LAYER — React application shell (appended after the engine code)
 // =============================================================================
 
-const SAVE_KEY = 'airline-sim-save-v1';
+const SAVE_KEY = 'airline-sim-save-v2-realtime';
 
 const TIME_SLOTS = [
   { label: 'Tôt le matin (06:00)', minute: 360 },
@@ -1004,31 +1239,17 @@ function Sidebar({ screen, setScreen, company }) {
   );
 }
 
-function TopBar({ state, onAdvance, advancing, saveLabel }) {
-  const netLast = state.finance.plHistory.length ? state.finance.plHistory[state.finance.plHistory.length - 1].netIncome : 0;
+function TopBar({ state, saveLabel }) {
+  const last = state.finance.plHistory.length ? state.finance.plHistory[state.finance.plHistory.length - 1] : null;
+  const now = state.meta.currentTime ? new Date(state.meta.currentTime) : new Date();
   return (
     <div className="topbar">
-      <div className="topbar-stat">
-        <div className="topbar-label">Semaine</div>
-        <div className="topbar-value">S{state.meta.week} · An {state.meta.year}</div>
-      </div>
-      <div className="topbar-stat">
-        <div className="topbar-label">Trésorerie</div>
-        <div className={'topbar-value ' + (state.company.cash < 0 ? 'neg' : '')}>{fmtMoney(state.company.cash)}</div>
-      </div>
-      <div className="topbar-stat">
-        <div className="topbar-label">Résultat (dern. semaine)</div>
-        <div className={'topbar-value ' + (netLast < 0 ? 'neg' : 'pos')}>{fmtMoney(netLast)}</div>
-      </div>
-      <div className="topbar-stat">
-        <div className="topbar-label">Réputation</div>
-        <div className="topbar-value">{Math.round(state.company.reputation)}/100</div>
-      </div>
+      <div className="topbar-stat"><div className="topbar-label">Temps réel</div><div className="topbar-value">{now.toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' })}</div></div>
+      <div className="topbar-stat"><div className="topbar-label">Trésorerie</div><div className={'topbar-value ' + (state.company.cash < 0 ? 'neg' : '')}>{fmtMoney(state.company.cash)}</div></div>
+      <div className="topbar-stat"><div className="topbar-label">Résultat récent</div><div className={'topbar-value ' + ((last?.netIncome || 0) < 0 ? 'neg' : 'pos')}>{fmtMoney(last?.netIncome || 0)}</div></div>
+      <div className="topbar-stat"><div className="topbar-label">Réputation</div><div className="topbar-value">{Math.round(state.company.reputation)}/100</div></div>
       <div className="topbar-spacer" />
-      <div className="save-indicator">{saveLabel}</div>
-      <button className="btn btn-primary" disabled={advancing || state.company.bankrupt} onClick={onAdvance}>
-        {advancing ? 'Calcul…' : 'Avancer d\u2019une semaine'} <ChevronRight size={16} />
-      </button>
+      <div className="save-indicator">● Simulation en direct · {saveLabel}</div>
     </div>
   );
 }
@@ -1501,7 +1722,7 @@ function HelpScreen({ onReset }) {
       <Panel title="Prise en main">
         <div className="help-block">
           <h4>Principe général</h4>
-          <p>Chaque semaine, vous ajustez votre flotte, vos lignes et vos tarifs, puis vous cliquez sur « Avancer d'une semaine ». Le marché réagit à vos décisions — et à celles de vos concurrents.</p>
+          <p>Le jeu fonctionne en temps réel. Les vols partent selon leur horaire, les recettes et coûts sont comptabilisés au fil du temps, et la partie continue même lorsque vous ne cliquez sur aucun bouton.</p>
         </div>
         <div className="help-block">
           <h4>Ouvrir une ligne</h4>
@@ -1563,18 +1784,28 @@ function App() {
   const [state, setState] = useState(null);
   const [loading, setLoading] = useState(true);
   const [screen, setScreen] = useState('DASHBOARD');
-  const [advancing, setAdvancing] = useState(false);
   const [toasts, setToasts] = useState([]);
   const toastId = useRef(0);
   const [saveLabel, setSaveLabel] = useState('');
 
   useEffect(() => {
+    let timer;
     (async () => {
       const saved = await loadSave();
       if (saved) setState(saved);
       setLoading(false);
     })();
-  }, []);
+    timer = setInterval(() => {
+      setState(prev => {
+        if (!prev || prev.company.bankrupt) return prev;
+        const next = realTimeTick(prev, Date.now());
+        if (next === prev) return prev;
+        persist(next);
+        return next;
+      });
+    }, 10000);
+    return () => clearInterval(timer);
+  }, [persist]);
 
   const notify = useCallback((text, tone) => {
     const id = ++toastId.current;
@@ -1601,18 +1832,6 @@ function App() {
     const s = newGame(name, base, Math.floor(Math.random() * 100000));
     setState(s);
     persist(s);
-  };
-
-  const handleAdvance = () => {
-    setAdvancing(true);
-    setTimeout(() => {
-      setState(prev => {
-        const next = weeklyTick(prev);
-        persist(next);
-        return next;
-      });
-      setAdvancing(false);
-    }, 120);
   };
 
   const handleReset = async () => {
@@ -1646,7 +1865,7 @@ function App() {
       <div className="app-shell">
         <Sidebar screen={screen} setScreen={setScreen} company={state.company} />
         <div className="app-main">
-          <TopBar state={state} onAdvance={handleAdvance} advancing={advancing} saveLabel={saveLabel} />
+          <TopBar state={state} saveLabel={saveLabel} />
           <div className="app-content">{content}</div>
         </div>
       </div>
