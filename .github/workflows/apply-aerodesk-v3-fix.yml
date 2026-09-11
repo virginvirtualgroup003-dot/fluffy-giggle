@@ -29,7 +29,7 @@ jobs:
         run: node scripts/apply-aerodesk-v3-fixes.mjs
 
       - name: Validate JSX syntax
-        run: npx --yes esbuild aerodesk.jsx --loader:.jsx=jsx --external:react --external:recharts --external:lucide-react --outfile=/tmp/aerodesk-check.js
+        run: npx --yes esbuild aerodesk.jsx --bundle --loader:.jsx=jsx --external:react --external:recharts --external:lucide-react --outfile=/tmp/aerodesk-check.js
 
       - name: Commit repaired AeroDesk source
         run: |
