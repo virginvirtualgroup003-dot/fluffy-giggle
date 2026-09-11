@@ -1,28 +1,20 @@
 import fs from 'node:fs';
 
-function replaceOnce(file, before, after) {
+function mustReplace(file, pattern, replacement, label) {
   const source = fs.readFileSync(file, 'utf8');
-  const count = source.split(before).length - 1;
-  if (count !== 1) {
-    throw new Error(`${file}: expected one match, found ${count}`);
-  }
-  fs.writeFileSync(file, source.replace(before, after));
+  if (!pattern.test(source)) throw new Error(`${file}: missing ${label}`);
+  fs.writeFileSync(file, source.replace(pattern, replacement));
 }
 
-replaceOnce('aerodesk.jsx', `function ensureStaffing(state) {
-  if (!state.staffing) {
-    state.staffing = {
-      pilots: CREW_DEFAULTS.pilots,
-      cabinCrew: CREW_DEFAULTS.cabinCrew,
-      reserveFraction: CREW_DEFAULTS.reserveFraction,
-      pipeline: [],
-    };
-  }
-  if (!Array.isArray(state.staffing.pipeline)) state.staffing.pipeline = [];
-  if (!Number.isFinite(state.staffing.reserveFraction)) state.staffing.reserveFraction = CREW_DEFAULTS.reserveFraction;
-  return state.staffing;
+function insertAfter(file, marker, insertion, label) {
+  const source = fs.readFileSync(file, 'utf8');
+  if (source.includes(insertion.trim())) return;
+  const index = source.indexOf(marker);
+  if (index < 0) throw new Error(`${file}: missing ${label}`);
+  fs.writeFileSync(file, source.slice(0, index + marker.length) + insertion + source.slice(index + marker.length));
 }
-`, `function ensureStaffing(state) {
+
+mustReplace('aerodesk.jsx', /function ensureStaffing\(state\) \{\n  if \(!state\.staffing\) \{\n    state\.staffing = \{\n      pilots: CREW_DEFAULTS\.pilots,\n      cabinCrew: CREW_DEFAULTS\.cabinCrew,\n      reserveFraction: CREW_DEFAULTS\.reserveFraction,\n      pipeline: \[\],\n    \};\n  \}\n  if \(!Array\.isArray\(state\.staffing\.pipeline\)\) state\.staffing\.pipeline = \[\];\n  if \(!Number\.isFinite\(state\.staffing\.reserveFraction\)\) state\.staffing\.reserveFraction = CREW_DEFAULTS\.reserveFraction;\n  return state\.staffing;\n\}/, `function ensureStaffing(state) {
   if (!state.staffing) {
     const fleetCrew = (state.fleet || [])
       .filter(f => f.status !== 'RETIRED')
@@ -47,18 +39,9 @@ replaceOnce('aerodesk.jsx', `function ensureStaffing(state) {
   if (!Number.isFinite(state.staffing.pilots)) state.staffing.pilots = CREW_DEFAULTS.pilots;
   if (!Number.isFinite(state.staffing.cabinCrew)) state.staffing.cabinCrew = CREW_DEFAULTS.cabinCrew;
   return state.staffing;
-}
-`);
+}`, 'legacy staffing initializer');
 
-replaceOnce('aerodesk.jsx', `  const nowMs = s.meta?.lastProcessedAt || Date.now();
-  const leadDays = Math.max(
-    pilotCount ? CREW_DEFAULTS.pilotRecruitmentDays : 0,
-    cabinCount ? CREW_DEFAULTS.cabinRecruitmentDays : 0,
-  );
-  s.company.cash -= cost;
-  staffing.pipeline.push({ pilots: pilotCount, cabinCrew: cabinCount, cost, orderedAt: nowMs, availableAt: nowMs + leadDays * DAY_MS });
-  addLedger(s, s.meta.week, 'CREW_RECRUITMENT', -cost, 'Recrutement, contrôles et qualification équipage');
-`, `  const nowMs = s.meta?.lastProcessedAt || Date.now();
+mustReplace('aerodesk.jsx', /  const nowMs = s\.meta\?\.lastProcessedAt \|\| Date\.now\(\);\n  const leadDays = Math\.max\(\n    pilotCount \? CREW_DEFAULTS\.pilotRecruitmentDays : 0,\n    cabinCount \? CREW_DEFAULTS\.cabinRecruitmentDays : 0,\n  \);\n  s\.company\.cash -= cost;\n  staffing\.pipeline\.push\(\{ pilots: pilotCount, cabinCrew: cabinCount, cost, orderedAt: nowMs, availableAt: nowMs \+ leadDays \* DAY_MS \}\);\n  addLedger\(s, s\.meta\.week, 'CREW_RECRUITMENT', -cost, 'Recrutement, contrôles et qualification équipage'\);/, `  const nowMs = s.meta?.lastProcessedAt || Date.now();
   s.company.cash -= cost;
   if (pilotCount) {
     staffing.pipeline.push({
@@ -78,46 +61,23 @@ replaceOnce('aerodesk.jsx', `  const nowMs = s.meta?.lastProcessedAt || Date.now
       availableAt: nowMs + CREW_DEFAULTS.cabinRecruitmentDays * DAY_MS,
     });
   }
-  addLedger(s, s.meta.week, 'CREW_RECRUITMENT', -cost, 'Recrutement, contrôles et qualification équipage');
-`);
+  addLedger(s, s.meta.week, 'CREW_RECRUITMENT', -cost, 'Recrutement, contrôles et qualification équipage');`, 'crew recruitment pipeline');
 
-replaceOnce('aerodesk.jsx', `  // Long sectors require augmented/rest-capable crewing and generate layover/per-diem expense.
-  const hourly = rosteredCrew * 95 * totalBlockHours * augmentation;
-  const perDiem = blockPerFlight >= 6 ? rosteredCrew * 75 * flights : 0;
-  const layover = blockPerFlight >= 10 ? rosteredCrew * 140 * flights : 0;
-  return hourly + perDiem + layover;
-`, `  // Base salaries are part of recurring payroll; flight operations carry only variable crew costs.
+mustReplace('aerodesk.jsx', /  \/\/ Long sectors require augmented\/rest-capable crewing and generate layover\/per-diem expense\.\n  const hourly = rosteredCrew \* 95 \* totalBlockHours \* augmentation;\n  const perDiem = blockPerFlight >= 6 \? rosteredCrew \* 75 \* flights : 0;\n  const layover = blockPerFlight >= 10 \? rosteredCrew \* 140 \* flights : 0;\n  return hourly \+ perDiem \+ layover;/, `  // Base salaries are part of recurring payroll; flight operations carry only variable crew costs.
   const augmentationPremium = rosteredCrew * 95 * totalBlockHours * Math.max(0, augmentation - 1);
   const perDiem = blockPerFlight >= 6 ? rosteredCrew * 75 * flights : 0;
   const layover = blockPerFlight >= 10 ? rosteredCrew * 140 * flights : 0;
-  return augmentationPremium + perDiem + layover;
-`);
+  return augmentationPremium + perDiem + layover;`, 'crew variable operating cost');
 
-replaceOnce('tests/aerodesk-crew-staffing.test.mjs', `    actionHireCrew: typeof actionHireCrew === 'function' ? actionHireCrew : undefined,
-    crewLegalLimits: typeof crewLegalLimits === 'function' ? crewLegalLimits : undefined,
-`, `    actionHireCrew: typeof actionHireCrew === 'function' ? actionHireCrew : undefined,
-    ensureStaffing: typeof ensureStaffing === 'function' ? ensureStaffing : undefined,
-    crewLegalLimits: typeof crewLegalLimits === 'function' ? crewLegalLimits : undefined,
-`);
+insertAfter('tests/aerodesk-crew-staffing.test.mjs', `    actionHireCrew: typeof actionHireCrew === 'function' ? actionHireCrew : undefined,\n`, `    ensureStaffing: typeof ensureStaffing === 'function' ? ensureStaffing : undefined,\n`, 'ensureStaffing export');
 
-replaceOnce('tests/aerodesk-crew-staffing.test.mjs', `  assert.equal(result.state.staffing.pipeline.length, 1);
-  assert.ok(result.state.staffing.pipeline[0].availableAt > result.state.meta.lastProcessedAt);
-`, `  assert.equal(result.state.staffing.pipeline.length, 2);
+mustReplace('tests/aerodesk-crew-staffing.test.mjs', /  assert\.equal\(result\.state\.staffing\.pipeline\.length, 1\);\n  assert\.ok\(result\.state\.staffing\.pipeline\[0\]\.availableAt > result\.state\.meta\.lastProcessedAt\);/, `  assert.equal(result.state.staffing.pipeline.length, 2);
   const pilotBatch = result.state.staffing.pipeline.find(batch => batch.pilots);
   const cabinBatch = result.state.staffing.pipeline.find(batch => batch.cabinCrew);
   assert.ok(pilotBatch.availableAt > cabinBatch.availableAt);
-  assert.ok(cabinBatch.availableAt > result.state.meta.lastProcessedAt);
-`);
+  assert.ok(cabinBatch.availableAt > result.state.meta.lastProcessedAt);`, 'crew recruitment test');
 
-replaceOnce('tests/aerodesk-crew-staffing.test.mjs', `  const deliveryAt = state.staffing.pipeline[0].availableAt;
-  E.processCrewPipeline(state, deliveryAt - 1);
-  assert.equal(state.staffing.pilots, beforePilots);
-  E.processCrewPipeline(state, deliveryAt);
-  assert.equal(state.staffing.pilots, beforePilots + 2);
-  assert.equal(state.staffing.cabinCrew, beforeCabin + 4);
-  assert.equal(state.staffing.pipeline.length, 0);
-});
-`, `  const firstDeliveryAt = Math.min(...state.staffing.pipeline.map(batch => batch.availableAt));
+mustReplace('tests/aerodesk-crew-staffing.test.mjs', /  const deliveryAt = state\.staffing\.pipeline\[0\]\.availableAt;\n  E\.processCrewPipeline\(state, deliveryAt - 1\);\n  assert\.equal\(state\.staffing\.pilots, beforePilots\);\n  E\.processCrewPipeline\(state, deliveryAt\);\n  assert\.equal\(state\.staffing\.pilots, beforePilots \+ 2\);\n  assert\.equal\(state\.staffing\.cabinCrew, beforeCabin \+ 4\);\n  assert\.equal\(state\.staffing\.pipeline\.length, 0\);\n\}\);/, `  const firstDeliveryAt = Math.min(...state.staffing.pipeline.map(batch => batch.availableAt));
   const finalDeliveryAt = Math.max(...state.staffing.pipeline.map(batch => batch.availableAt));
   E.processCrewPipeline(state, firstDeliveryAt - 1);
   assert.equal(state.staffing.pilots, beforePilots);
@@ -144,22 +104,13 @@ test('legacy saves without staffing are migrated from current fleet establishmen
   assert.ok(staffing.cabinCrew > 24);
   assert.ok(Array.isArray(staffing.pipeline));
   assert.equal(staffing.pipeline.length, 0);
-});
-`);
+});`, 'crew delivery test');
 
-replaceOnce('tests/aerodesk-engine.test.mjs', `test('long-haul crew cost adds augmented staffing when duty exceeds a basic FDP envelope', () => {
-  assert.equal(typeof E.crewCostForOperations, 'function');
-  const type = E.AIRCRAFT_TYPES.find(t => t.id === '787-9');
-  const unaugmentedLinearCost = type.crew * 95 * 14;
-  const longHaulCost = E.crewCostForOperations(type, 14, 1);
-  assert.ok(longHaulCost > unaugmentedLinearCost * 1.15);
-});
-`, `test('long-haul crew variable cost is limited to away-from-base operating expenses', () => {
+mustReplace('tests/aerodesk-engine.test.mjs', /test\('long-haul crew cost adds augmented staffing when duty exceeds a basic FDP envelope', \(\) => \{\n  assert\.equal\(typeof E\.crewCostForOperations, 'function'\);\n  const type = E\.AIRCRAFT_TYPES\.find\(t => t\.id === '787-9'\);\n  const unaugmentedLinearCost = type\.crew \* 95 \* 14;\n  const longHaulCost = E\.crewCostForOperations\(type, 14, 1\);\n  assert\.ok\(longHaulCost > unaugmentedLinearCost \* 1\.15\);\n\}\);/, `test('long-haul crew variable cost is limited to away-from-base operating expenses', () => {
   assert.equal(typeof E.crewCostForOperations, 'function');
   const type = E.AIRCRAFT_TYPES.find(t => t.id === '787-9');
   const unaugmentedLinearCost = type.crew * 95 * 14;
   const longHaulCost = E.crewCostForOperations(type, 14, 1);
   assert.ok(longHaulCost > 0);
   assert.ok(longHaulCost < unaugmentedLinearCost);
-});
-`);
+});`, 'crew cost regression test');
