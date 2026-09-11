@@ -254,6 +254,7 @@ function newGame(companyName, homeBaseId, rngSeed) {
         ancillaryRevenue: 0,
         fuelExpense: 0,
         laborExpense: 0,
+        crewExpense: 0,
         maintenanceExpense: 0,
         airportExpense: 0,
         handlingExpense: 0,
@@ -568,20 +569,17 @@ function v3ProcessRecurringCosts(state, elapsedMs) {
   const insurance =
     insuredValue * AERODESK_V3.insuranceAnnualRate * days / 365;
 
-  state.company.cash -= labor + insurance;
-
   v3BookAccounting(state, 'laborExpense', labor);
   v3BookAccounting(state, 'insuranceExpense', insurance);
 
   addLedger(state, state.meta.week, 'LABOR', -labor, 'Personnel et charges opérationnelles');
   addLedger(state, state.meta.week, 'INSURANCE', -insurance, 'Assurance flotte');
 
-  return state;
+  return { labor, insurance };
 }
 
 function v3AddAncillaryRevenue(state, passengerRevenue) {
   const ancillary = passengerRevenue * AERODESK_V3.ancillaryRate;
-  state.company.cash += ancillary;
   v3BookAccounting(state, 'ancillaryRevenue', ancillary);
   return ancillary;
 }
@@ -589,7 +587,6 @@ function v3AddAncillaryRevenue(state, passengerRevenue) {
 function v3ApplyCarbonCost(state, fuelLiters) {
   const tonnesCO2 = fuelLiters * AERODESK_V3.co2KgPerLiterJetA / 1000;
   const cost = tonnesCO2 * AERODESK_V3.carbonEURPerTonneCO2;
-  state.company.cash -= cost;
   v3BookAccounting(state, 'taxesExpense', cost);
   return cost;
 }
@@ -603,6 +600,7 @@ function v3GetPnl(state) {
   const expenses =
     (a.fuelExpense || 0) +
     (a.laborExpense || 0) +
+    (a.crewExpense || 0) +
     (a.maintenanceExpense || 0) +
     (a.airportExpense || 0) +
     (a.handlingExpense || 0) +
@@ -723,8 +721,11 @@ function processRealTimeDay(state, fromMs, toMs, rng) {
 
   let revenue = 0, costs = 0;
   v3RefreshOperationalCounters(state);
-  v3ProcessRecurringCosts(state, elapsed);
-  const breakdown = { fuel: 0, crew: 0, maint: 0, airport: 0, handling: 0, leasing: 0, distribution: 0, insurance: 0, overhead: 0, interest: 0 };
+  const breakdown = { fuel: 0, crew: 0, maint: 0, airport: 0, handling: 0, leasing: 0, distribution: 0, insurance: 0, overhead: 0, interest: 0, taxes: 0 };
+  const recurring = v3ProcessRecurringCosts(state, elapsed);
+  costs += recurring.labor + recurring.insurance;
+  breakdown.crew += recurring.labor;
+  breakdown.insurance += recurring.insurance;
 
   state.routes.forEach(route => {
     if (route.status !== 'ACTIVE') return;
@@ -757,10 +758,12 @@ function processRealTimeDay(state, fromMs, toMs, rng) {
     breakdown.airport += airportCost;
     breakdown.handling += handlingCost;
     breakdown.distribution += distributionCost;
+    breakdown.taxes += carbonCost;
 
     const accounting = v3EnsureFinance(state);
     accounting.passengerRevenue = (accounting.passengerRevenue || 0) + routeRev;
     accounting.fuelExpense = (accounting.fuelExpense || 0) + fuelCost;
+    accounting.crewExpense = (accounting.crewExpense || 0) + crewCost;
     accounting.maintenanceExpense = (accounting.maintenanceExpense || 0) + maintCost;
     accounting.airportExpense = (accounting.airportExpense || 0) + airportCost;
     accounting.handlingExpense = (accounting.handlingExpense || 0) + handlingCost;
@@ -784,20 +787,24 @@ function processRealTimeDay(state, fromMs, toMs, rng) {
         f.status = 'MAINTENANCE';
         f.maintUntil = toMs + 2 * DAY_MS;
         const eventCost = type.maintPerHour * 25;
-        state.company.cash -= eventCost;
+        costs += eventCost;
+        breakdown.maint += eventCost;
+        accounting.maintenanceExpense = (accounting.maintenanceExpense || 0) + eventCost;
         addLedger(state, state.meta.week, 'MAINT_UNSCHEDULED', -eventCost, 'Maintenance non programmée');
       }
     });
   });
 
-  const fleetValueNow = fleetValue(state);
-  const insurance = 0;
+  const leasing = state.fleet
+    .filter(f => f.ownership === 'LEASED')
+    .reduce((sum, f) => sum + prorateWeekly(aircraftType(f.typeId).leaseWeekly, elapsed), 0);
   const overhead = prorateWeekly(9000 + state.fleet.length * 900 + state.routes.filter(r => r.status === 'ACTIVE').length * 300, elapsed);
-  breakdown.insurance = insurance;
+  breakdown.leasing = leasing;
   breakdown.overhead = overhead;
-  costs += overhead;
+  costs += leasing + overhead;
 
   const accounting2 = v3EnsureFinance(state);
+  accounting2.leasingExpense = (accounting2.leasingExpense || 0) + leasing;
   accounting2.overheadExpense = (accounting2.overheadExpense || 0) + overhead;
 
   let interestPaid = 0, principalPaid = 0;
@@ -1609,7 +1616,7 @@ function BuyAircraftForm({ state, dispatch, notify, onDone }) {
 // -----------------------------------------------------------------------------
 function FinanceScreen({ state }) {
   const pl = state.finance.plHistory.slice(-26);
-  const chartData = pl.map(p => ({ week: 'S' + p.week, Carburant: Math.round(p.breakdown.fuel), Équipage: Math.round(p.breakdown.crew), Maintenance: Math.round(p.breakdown.maint), Aéroports: Math.round(p.breakdown.airport), Autres: Math.round(p.breakdown.handling + p.breakdown.distribution + p.breakdown.insurance + p.breakdown.overhead + p.breakdown.interest + p.breakdown.leasing) }));
+  const chartData = pl.map(p => ({ week: 'S' + p.week, Carburant: Math.round(p.breakdown.fuel), Équipage: Math.round(p.breakdown.crew), Maintenance: Math.round(p.breakdown.maint), Aéroports: Math.round(p.breakdown.airport), Autres: Math.round(p.breakdown.handling + p.breakdown.distribution + p.breakdown.insurance + p.breakdown.overhead + p.breakdown.interest + p.breakdown.leasing + (p.breakdown.taxes || 0)) }));
   const last = pl.length ? pl[pl.length - 1] : null;
   const fv = fleetValue(state);
 
@@ -1788,6 +1795,13 @@ function App() {
   const toastId = useRef(0);
   const [saveLabel, setSaveLabel] = useState('');
 
+  const persist = useCallback(async (s) => {
+    setSaveLabel('Enregistrement…');
+    const ok = await writeSave(s);
+    setSaveLabel(ok ? 'Sauvegardé' : 'Sauvegarde indisponible');
+    setTimeout(() => setSaveLabel(''), 1500);
+  }, []);
+
   useEffect(() => {
     let timer;
     (async () => {
@@ -1811,13 +1825,6 @@ function App() {
     const id = ++toastId.current;
     setToasts(t => [...t, { id, text, tone: tone || 'neutral' }]);
     setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 3200);
-  }, []);
-
-  const persist = useCallback(async (s) => {
-    setSaveLabel('Enregistrement…');
-    const ok = await writeSave(s);
-    setSaveLabel(ok ? 'Sauvegardé' : 'Sauvegarde indisponible');
-    setTimeout(() => setSaveLabel(''), 1500);
   }, []);
 
   const dispatch = useCallback((fn) => {
