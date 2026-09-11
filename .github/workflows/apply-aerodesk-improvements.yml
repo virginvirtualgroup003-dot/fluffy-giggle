@@ -1,0 +1,48 @@
+name: Apply AeroDesk comprehensive improvements
+
+on:
+  push:
+    branches:
+      - fix/aerodesk-v3-accounting-runtime
+    paths:
+      - scripts/improve-aerodesk-v3.mjs
+      - .github/workflows/apply-aerodesk-improvements.yml
+
+permissions:
+  contents: write
+
+jobs:
+  improve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout improvement branch
+        uses: actions/checkout@v4
+        with:
+          ref: fix/aerodesk-v3-accounting-runtime
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Apply deterministic improvement patch
+        run: node scripts/improve-aerodesk-v3.mjs
+
+      - name: Run engine regression tests
+        run: node --test tests/aerodesk-engine.test.mjs
+
+      - name: Validate JSX bundle
+        run: npx --yes esbuild aerodesk.jsx --bundle --loader:.jsx=jsx --external:react --external:recharts --external:lucide-react --outfile=/tmp/aerodesk-check.js
+
+      - name: Commit improved AeroDesk source
+        run: |
+          if git diff --quiet -- aerodesk.jsx; then
+            echo "No AeroDesk source changes to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add aerodesk.jsx
+          git commit -m "fix: harden AeroDesk realtime simulation engine"
+          git push origin HEAD:fix/aerodesk-v3-accounting-runtime
