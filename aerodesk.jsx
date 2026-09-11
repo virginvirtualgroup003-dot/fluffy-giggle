@@ -426,6 +426,7 @@ function newGame(companyName, homeBaseId, rngSeed) {
     orders: [], // pending aircraft deliveries
     finance: {
       loans: [],
+      leaseDeposits: 0,
       cashHistory: [{ week: 0, cash: 45e6 }],
       plHistory: [],
       ledgerRecent: [],
@@ -439,6 +440,8 @@ function newGame(companyName, homeBaseId, rngSeed) {
         airportExpense: 0,
         handlingExpense: 0,
         distributionExpense: 0,
+        disruptionExpense: 0,
+        depreciationExpense: 0,
         leasingExpense: 0,
         insuranceExpense: 0,
         overheadExpense: 0,
@@ -918,6 +921,7 @@ function v3GetPnl(state) {
     (a.handlingExpense || 0) +
     (a.distributionExpense || 0) +
     (a.disruptionExpense || 0) +
+    (a.depreciationExpense || 0) +
     (a.leasingExpense || 0) +
     (a.insuranceExpense || 0) +
     (a.overheadExpense || 0) +
@@ -1049,11 +1053,14 @@ function processRealTimeDay(state, fromMs, toMs, rng) {
 
   let revenue = 0, costs = 0;
   v3RefreshOperationalCounters(state);
-  const breakdown = { fuel: 0, crew: 0, maint: 0, airport: 0, handling: 0, leasing: 0, distribution: 0, disruption: 0, insurance: 0, overhead: 0, interest: 0, taxes: 0 };
+  const breakdown = { fuel: 0, crew: 0, maint: 0, airport: 0, handling: 0, leasing: 0, distribution: 0, disruption: 0, depreciation: 0, insurance: 0, overhead: 0, interest: 0, taxes: 0 };
   const recurring = v3ProcessRecurringCosts(state, elapsed);
   costs += recurring.labor + recurring.insurance;
   breakdown.crew += recurring.labor;
   breakdown.insurance += recurring.insurance;
+  const depreciation = calculateDepreciationExpense(state, elapsed);
+  breakdown.depreciation += depreciation;
+  v3BookAccounting(state, 'depreciationExpense', depreciation);
 
   state.routes.forEach(route => {
     if (route.status !== 'ACTIVE') return;
@@ -1176,8 +1183,9 @@ function processRealTimeDay(state, fromMs, toMs, rng) {
   accounting3.interestExpense = (accounting3.interestExpense || 0) + interestPaid;
 
   state.company.cash += revenue - costs - principalPaid;
-  const netIncome = revenue - costs;
-  upsertWeeklyFinanceHistory(state, toMs, revenue, costs, netIncome, breakdown);
+  const accountingCosts = costs + depreciation;
+  const netIncome = revenue - accountingCosts;
+  upsertWeeklyFinanceHistory(state, toMs, revenue, accountingCosts, netIncome, breakdown);
 
   state.fleet.forEach(f => { f.ageWeeks = (f.ageWeeks || 0) + elapsed / WEEK_MS; });
   state.operations.activeFlightWindows = (state.operations.activeFlightWindows || []).filter(f => f.arrivalAt > toMs);
@@ -1419,6 +1427,47 @@ function structuredCloneLite(obj) {
 // 9. PLAYER ACTIONS
 // -----------------------------------------------------------------------------
 
+
+function buildWeeklySchedule(frequencyPerWeek, baseMinute) {
+  const frequency = Math.max(1, Math.round(frequencyPerWeek));
+  const dailyCounts = Array(7).fill(Math.floor(frequency / 7));
+  for (let i = 0; i < frequency % 7; i += 1) dailyCounts[i] += 1;
+  const schedule = [];
+  dailyCounts.forEach((count, dayOfWeek) => {
+    if (!count) return;
+    const spacing = count === 1 ? 0 : Math.min(600, Math.floor(720 / (count - 1)));
+    let first = baseMinute;
+    if (count > 1) first = clamp(baseMinute - spacing * (count - 1) / 2, 360, 21 * 60);
+    for (let wave = 0; wave < count; wave += 1) {
+      const minute = Math.round(clamp(first + wave * spacing, 300, 23 * 60 + 30));
+      schedule.push({ dayOfWeek, minute });
+    }
+  });
+  return schedule;
+}
+
+function deliveryLeadDays(type, ownership) {
+  if (ownership === 'LEASED') {
+    if (type.category === 'REGIONAL') return 21;
+    if (type.category?.startsWith('WIDEBODY')) return 45;
+    return 30;
+  }
+  if (type.category === 'REGIONAL') return 365;
+  if (type.category?.startsWith('WIDEBODY')) return 730;
+  return 540;
+}
+
+function calculateDepreciationExpense(state, elapsedMs) {
+  const years = elapsedMs / (365 * DAY_MS);
+  return state.fleet
+    .filter(f => f.ownership === 'OWNED' && (f.ageWeeks || 0) / 52 < 25)
+    .reduce((sum, f) => {
+      const type = aircraftType(f.typeId);
+      const depreciableBase = type.price * 0.85; // 15% residual value
+      return sum + (depreciableBase / 25) * years;
+    }, 0);
+}
+
 function actionOpenRoute(state, { originId, destId, aircraftTypeId, frequencyPerWeek, fareStrategy, departMinute }) {
   const s = structuredCloneLite(state);
   const issues = validateRoutePlan({ originId, destId, aircraftTypeId, departMinute });
@@ -1428,7 +1477,7 @@ function actionOpenRoute(state, { originId, destId, aircraftTypeId, frequencyPer
   }
   delete s.lastActionError;
   const id = 'R' + (s.company.nextRouteSerial++);
-  const schedule = Array.from({ length: frequencyPerWeek }, (_, i) => ({ dayOfWeek: i % 7, minute: departMinute }));
+  const schedule = buildWeeklySchedule(frequencyPerWeek, departMinute);
   s.routes.push({ id, originId, destId, aircraftTypeId, frequencyPerWeek, fareStrategy: fareStrategy || 'COMPETITIVE', schedule, status: 'ACTIVE', history: [] });
   return s;
 }
@@ -1445,7 +1494,7 @@ function actionSetFrequency(state, routeId, frequencyPerWeek) {
   const r = s.routes.find(x => x.id === routeId);
   if (r) {
     r.frequencyPerWeek = frequencyPerWeek;
-    r.schedule = Array.from({ length: frequencyPerWeek }, (_, i) => ({ dayOfWeek: i % 7, minute: r.schedule[0]?.minute ?? 480 }));
+    r.schedule = buildWeeklySchedule(frequencyPerWeek, r.schedule[0]?.minute ?? 480);
   }
   return s;
 }
@@ -1460,20 +1509,33 @@ function actionSuspendRoute(state, routeId) {
 function actionBuyAircraft(state, typeId, ownership) {
   const s = structuredCloneLite(state);
   const type = aircraftType(typeId);
-  const leadDays = ownership === 'LEASED' ? 14 : 35;
+  if (!type) return { state: s, error: 'Type avion inconnu.' };
+  const leadDays = deliveryLeadDays(type, ownership);
+
   if (ownership === 'OWNED') {
-    if (s.company.cash < type.price * 0.2) return { state: s, error: 'Trésorerie insuffisante pour un apport minimal.' };
-    s.company.cash -= type.price * 0.2;
-    const principal = type.price * 0.8;
-    const weeklyRate = 0.00125; // ~6.7% annualized
-    const termWeeks = 520; // 10-year amortization
+    const equityShare = 0.15;
+    const downPayment = type.price * equityShare;
+    if (s.company.cash < downPayment) return { state: s, error: 'Trésorerie insuffisante pour l’apport de financement.' };
+    s.company.cash -= downPayment;
+    const principal = type.price - downPayment;
+    const annualRate = clamp(0.057 + Math.max(0, 60 - s.company.reputation) * 0.0008 + (s.company.cash < 10e6 ? 0.012 : 0), 0.05, 0.105);
+    const weeklyRate = Math.pow(1 + annualRate, 1 / 52) - 1;
+    const termWeeks = 624; // 12 years
     const annuityFactor = weeklyRate / (1 - Math.pow(1 + weeklyRate, -termWeeks));
-    const loan = {
-      id: 'L' + Date.now() % 100000, principal, weeklyRate,
+    s.finance.loans.push({
+      id: 'L' + Date.now() % 100000, principal, weeklyRate, annualRate,
       remainingWeeks: termWeeks, weeklyPayment: principal * annuityFactor,
-    };
-    s.finance.loans.push(loan);
+      assetTypeId: typeId,
+    });
+  } else if (ownership === 'LEASED') {
+    const securityDeposit = type.leaseWeekly * 8;
+    if (s.company.cash < securityDeposit) return { state: s, error: 'Trésorerie insuffisante pour le dépôt de garantie du bail.' };
+    s.company.cash -= securityDeposit;
+    s.finance.leaseDeposits = (s.finance.leaseDeposits || 0) + securityDeposit;
+    s.orders.push({ typeId, ownership, securityDeposit, weeksLeft: leadDays / 7, deliveryAt: Date.now() + leadDays * DAY_MS });
+    return { state: s, error: null };
   }
+
   s.orders.push({ typeId, ownership, weeksLeft: leadDays / 7, deliveryAt: Date.now() + leadDays * DAY_MS });
   return { state: s, error: null };
 }
@@ -1481,7 +1543,21 @@ function actionBuyAircraft(state, typeId, ownership) {
 function actionAssignAircraft(state, aircraftId, routeId) {
   const s = structuredCloneLite(state);
   const f = s.fleet.find(x => x.id === aircraftId);
-  if (f) f.assignedRouteId = routeId;
+  const route = s.routes.find(x => x.id === routeId);
+  delete s.lastActionError;
+  if (!f || !route) {
+    s.lastActionError = 'Appareil ou ligne introuvable.';
+    return s;
+  }
+  if (f.status !== 'ACTIVE') {
+    s.lastActionError = `${f.id} n’est pas disponible pour affectation.`;
+    return s;
+  }
+  if (f.typeId !== route.aircraftTypeId) {
+    s.lastActionError = `Le type de ${f.id} ne correspond pas au type programmé sur ${route.id}.`;
+    return s;
+  }
+  f.assignedRouteId = routeId;
   return s;
 }
 
@@ -2033,8 +2109,8 @@ function BuyAircraftForm({ state, dispatch, notify, onDone }) {
         <label className="field">
           <span>Mode d'acquisition</span>
           <select value={ownership} onChange={e => setOwnership(e.target.value)}>
-            <option value="LEASED">Location (pas d'apport, loyer hebdomadaire)</option>
-            <option value="OWNED">Achat (apport de 20 %, financement 10 ans)</option>
+            <option value="LEASED">Location (dépôt de garantie + loyer hebdomadaire)</option>
+            <option value="OWNED">Achat neuf (apport 15 %, financement 12 ans, délai de production)</option>
           </select>
         </label>
       </div>
@@ -2056,7 +2132,7 @@ function BuyAircraftForm({ state, dispatch, notify, onDone }) {
 // -----------------------------------------------------------------------------
 function FinanceScreen({ state }) {
   const pl = state.finance.plHistory.slice(-26);
-  const chartData = pl.map(p => ({ week: 'S' + p.week, Carburant: Math.round(p.breakdown.fuel), Équipage: Math.round(p.breakdown.crew), Maintenance: Math.round(p.breakdown.maint), Aéroports: Math.round(p.breakdown.airport), Autres: Math.round(p.breakdown.handling + p.breakdown.distribution + (p.breakdown.disruption || 0) + p.breakdown.insurance + p.breakdown.overhead + p.breakdown.interest + p.breakdown.leasing + (p.breakdown.taxes || 0)) }));
+  const chartData = pl.map(p => ({ week: 'S' + p.week, Carburant: Math.round(p.breakdown.fuel), Équipage: Math.round(p.breakdown.crew), Maintenance: Math.round(p.breakdown.maint), Aéroports: Math.round(p.breakdown.airport), Autres: Math.round(p.breakdown.handling + p.breakdown.distribution + (p.breakdown.disruption || 0) + (p.breakdown.depreciation || 0) + p.breakdown.insurance + p.breakdown.overhead + p.breakdown.interest + p.breakdown.leasing + (p.breakdown.taxes || 0)) }));
   const last = pl.length ? pl[pl.length - 1] : null;
   const fv = fleetValue(state);
 
