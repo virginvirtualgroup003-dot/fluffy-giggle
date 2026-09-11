@@ -1,12 +1,166 @@
 import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
-import { execFileSync } from 'node:child_process';
 
-const patchBase64 = `ZGlmZiAtLWdpdCBhL2Flcm9kZXNrLmpzeCBiL2Flcm9kZXNrLmpzeAppbmRleCAwYjIyNzNlLi5kMTg5YjY0IDEwMDY0NAotLS0gYS9hZXJvZGVzay5qc3gKKysrIGIvYWVyb2Rlc2suanN4CkBAIC0xMjA2LDE1ICsxMjA2LDI4IEBAIGNvbnN0IENSRVdfREVGQVVMVFMgPSB7CiAKIGZ1bmN0aW9uIGVuc3VyZVN0YWZmaW5nKHN0YXRlKSB7CiAgIGlmICghc3RhdGUuc3RhZmZpbmcpIHsKKyAgICBjb25zdCBmbGVldENyZXcgPSAoc3RhdGUuZmxlZXQgfHwgW10pCisgICAgICAuZmlsdGVyKGYgPT4gZi5zdGF0dXMgIT09ICdSRVRJUkVEJykKKyAgICAgIC5yZWR1Y2UoKGFjYywgZikgPT4geworICAgICAgICBjb25zdCB0eXBlID0gYWlyY3JhZnRUeXBlKGYudHlwZUlkKTsKKyAgICAgICAgaWYgKCF0eXBlKSByZXR1cm4gYWNjOworICAgICAgICBjb25zdCBjcmV3ID0gbWluaW11bU9wZXJhdGluZ0NyZXcodHlwZSk7CisgICAgICAgIHJldHVybiB7CisgICAgICAgICAgcGlsb3RzOiBhY2MucGlsb3RzICsgY3Jldy5mbGlnaHREZWNrICogNiwKKyAgICAgICAgICBjYWJpbkNyZXc6IGFjYy5jYWJpbkNyZXcgKyBjcmV3LmNhYmluICogNiwKKyAgICAgICAgfTsKKyAgICAgIH0sIHsgcGlsb3RzOiAwLCBjYWJpbkNyZXc6IDAgfSk7CiAgICAgc3RhdGUuc3RhZmZpbmcgPSB7Ci0gICAgICBwaWxvdHM6IENSRVdfREVGQVVMVFMucGlsb3RzLAotICAgICAgY2FiaW5DcmV3OiBDUkVXX0RFRkFVTFRTLmNhYmluQ3JldywKKyAgICAgIHBpbG90czogTWF0aC5tYXgoQ1JFV19ERUZBVUxUUy5waWxvdHMsIGZsZWV0Q3Jldy5waWxvdHMpLAorICAgICAgY2FiaW5DcmV3OiBNYXRoLm1heChDUkVXX0RFRkFVTFRTLmNhYmluQ3JldywgZmxlZXRDcmV3LmNhYmluQ3JldyksCiAgICAgICByZXNlcnZlRnJhY3Rpb246IENSRVdfREVGQVVMVFMucmVzZXJ2ZUZyYWN0aW9uLAogICAgICAgcGlwZWxpbmU6IFtdLAogICAgIH07CiAgIH0KICAgaWYgKCFBcnJheS5pc0FycmF5KHN0YXRlLnN0YWZmaW5nLnBpcGVsaW5lKSkgc3RhdGUuc3RhZmZpbmcucGlwZWxpbmUgPSBbXTsKICAgaWYgKCFOdW1iZXIuaXNGaW5pdGUoc3RhdGUuc3RhZmZpbmcucmVzZXJ2ZUZyYWN0aW9uKSkgc3RhdGUuc3RhZmZpbmcucmVzZXJ2ZUZyYWN0aW9uID0gQ1JFV19ERUZBVUxUUy5yZXNlcnZlRnJhY3Rpb247CisgIGlmICghTnVtYmVyLmlzRmluaXRlKHN0YXRlLnN0YWZmaW5nLnBpbG90cykpIHN0YXRlLnN0YWZmaW5nLnBpbG90cyA9IENSRVdfREVGQVVMVFMucGlsb3RzOworICBpZiAoIU51bWJlci5pc0Zpbml0ZShzdGF0ZS5zdGFmZmluZy5jYWJpbkNyZXcpKSBzdGF0ZS5zdGFmZmluZy5jYWJpbkNyZXcgPSBDUkVXX0RFRkFVTFRTLmNhYmluQ3JldzsKICAgcmV0dXJuIHN0YXRlLnN0YWZmaW5nOwogfQogCkBAIC0xMzA0LDEyICsxMzE3LDI1IEBAIGZ1bmN0aW9uIGFjdGlvbkhpcmVDcmV3KHN0YXRlLCB7IHBpbG90cyA9IDAsIGNhYmluQ3JldyA9IDAgfSA9IHt9KSB7CiAgIGNvbnN0IGNvc3QgPSBwaWxvdENvdW50ICogQ1JFV19ERUZBVUxUUy5waWxvdFJlY3J1aXRtZW50Q29zdFVTRCArIGNhYmluQ291bnQgKiBDUkVXX0RFRkFVTFRTLmNhYmluUmVjcnVpdG1lbnRDb3N0VVNEOwogICBpZiAocy5jb21wYW55LmNhc2ggPCBjb3N0KSByZXR1cm4geyBzdGF0ZTogcywgZXJyb3I6ICdUcsOpc29yZXJpZSBpbnN1ZmZpc2FudGUgcG91ciBsZSByZWNydXRlbWVudCBldCBsYSBxdWFsaWZpY2F0aW9uLicgfTsKICAgY29uc3Qgbm93TXMgPSBzLm1ldGE/Lmxhc3RQcm9jZXNzZWRBdCB8fCBEYXRlLm5vdygpOwotICBjb25zdCBsZWFkRGF5cyA9IE1hdGgubWF4KAotICAgIHBpbG90Q291bnQgPyBDUkVXX0RFRkFVTFRTLnBpbG90UmVjcnVpdG1lbnREYXlzIDogMCwKLSAgICBjYWJpbkNvdW50ID8gQ1JFV19ERUZBVUxUUy5jYWJpblJlY3J1aXRtZW50RGF5cyA6IDAsCi0gICk7CiAgIHMuY29tcGFueS5jYXNoIC09IGNvc3Q7Ci0gIHN0YWZmaW5nLnBpcGVsaW5lLnB1c2goeyBwaWxvdHM6IHBpbG90Q291bnQsIGNhYmluQ3JldzogY2FiaW5Db3VudCwgY29zdCwgb3JkZXJlZEF0OiBub3dNcywgYXZhaWxhYmxlQXQ6IG5vd01zICsgbGVhZERheXMgKiBEQVlfTVMgfSk7CisgIGlmIChwaWxvdENvdW50KSB7CisgICAgc3RhZmZpbmcucGlwZWxpbmUucHVzaCh7CisgICAgICBwaWxvdHM6IHBpbG90Q291bnQsCisgICAgICBjYWJpbkNyZXc6IDAsCisgICAgICBjb3N0OiBwaWxvdENvdW50ICogQ1JFV19ERUZBVUxUUy5waWxvdFJlY3J1aXRtZW50Q29zdFVTRCwKKyAgICAgIG9yZGVyZWRBdDogbm93TXMsCisgICAgICBhdmFpbGFibGVBdDogbm93TXMgKyBDUkVXX0RFRkFVTFRTLnBpbG90UmVjcnVpdG1lbnREYXlzICogREFZX01TLAorICAgIH0pOworICB9CisgIGlmIChjYWJpbkNvdW50KSB7CisgICAgc3RhZmZpbmcucGlwZWxpbmUucHVzaCh7CisgICAgICBwaWxvdHM6IDAsCisgICAgICBjYWJpbkNyZXc6IGNhYmluQ291bnQsCisgICAgICBjb3N0OiBjYWJpbkNvdW50ICogQ1JFV19ERUZBVUxUUy5jYWJpblJlY3J1aXRtZW50Q29zdFVTRCwKKyAgICAgIG9yZGVyZWRBdDogbm93TXMsCisgICAgICBhdmFpbGFibGVBdDogbm93TXMgKyBDUkVXX0RFRkFVTFRTLmNhYmluUmVjcnVpdG1lbnREYXlzICogREFZX01TLAorICAgIH0pOworICB9CiAgIGFkZExlZGdlcihzLCBzLm1ldGEud2VlaywgJ0NSRVdfUkVDUlVJVE1FTlQnLCAtY29zdCwgJ1JlY3J1dGVtZW50LCBjb250csO0bGVzIGV0IHF1YWxpZmljYXRpb24gw6lxdWlwYWdlJyk7CiAgIHJldHVybiB7IHN0YXRlOiBzLCBlcnJvciA6IG51bGw gfTsKIH0KQEAgLTEzNDMsMTEgKzEzNjksMTEgQEAgZnVuY3Rpb24gY3Jld0Nvc3RGb3JPcGVyYXRpb25zKHR5cGUsIHRvdGFsQmxvY2tIb3VycywgZmxpZ2h0cykgewogCiAgIGNvbnN0IHJlZ3VsYXRvcnlDcmV3ID0gbWluaW11bU9wZXJhdGluZ0NyZXcodHlwZSkudG90YWw7CiAgIGNvbnN0IHJvc3RlcmVkQ3JldyA9IE1hdGgubWF4KHR5cGUuY3JldywgcmVndWxhdG9yeUNyZXcpOwotICAvLyBMb25nIHNlY3RvcnMgcmVxdWlyZSBhdWdtZW50ZWQvcmVzdC1jYXBhYmxlIGNyZXdpbmcgYW5kIGdlbmVyYXRlIGxheW92ZXIvcGVyLWRpZW0gZXhwZW5zZS4KLSAgY29uc3QgaG91cmx5ID0gcm9zdGVyZWRDcmV3ICogOTUgKiB0b3RhbEJsb2NrSG91cnMgKiBhdWdtZW50YXRpb247CisgIC8vIEJhc2Ugc2FsYXJpZXMgYXJlIHBhcnQgb2YgcmVjdXJyaW5nIHBheXJvbGw7IGZsaWdodCBvcGVyYXRpb25zIGNhcnJ5IG9ubHkgdmFyaWFibGUgY3JldyBjb3N0cy4KKyAgY29uc3QgYXVnbWVudGF0aW9uUHJlbWl1bSA9IHJvc3RlcmVkQ3JldyAqIDk1ICogdG90YWxCbG9ja0hvdXJzICogTWF0aC5tYXgoMCwgYXVnbWVudGF0aW9uIC0gMSk7CiAgIGNvbnN0IHBlckRpZW0gPSBibG9ja1BlckZsaWdodCA+PSA2ID8gcm9zdGVyZWRDcmV3ICogNzUgKiBmbGlnaHRzIDogMDsKICAgY29uc3QgbGF5b3ZlciA9IGJsb2NrUGVyRmxpZ2h0ID49IDEwID8gcm9zdGVyZWRDcmV3ICogMTQwICogZmxpZ2h0cyA6IDA7Ci0gIHJldHVybiBob3VybHkgKyBwZXJEaWVtICsgbGF5b3ZlcjsKKyAgcmV0dXJuIGF1Z21lbnRhdGlvblByZW1pdW0gKyBwZXJEaWVtICsgbGF5b3ZlcjsKIH0KIAogZnVuY3Rpb24gYXBwbHlBaXJjcmFmdFVzYWdlKHN0YXRlLCBhaXJjcmFmdCwgdHlwZSwgZmxvd25DeWNsZXMsIGZsb3duQmxvY2tIb3Vycywgbm93TXMsIHJuZyA9IE1hdGgucmFuZG9tKSB7CmRpZmYgLS1naXQgYS90ZXN0cy9hZXJvZGVzay1jcmV3LXN0YWZmaW5nLnRlc3QubWpzIGIvdGVzdHMvYWVyb2Rlc2stY3Jldy1zdGFmZmluZy50ZXN0Lm1qcwppbmRleCBlMzQwODcyLi4xZGUzM2JmIDEwMDY0NAotLS0gYS90ZXN0cy9hZXJvZGVzay1jcmV3LXN0YWZmaW5nLnRlc3QubWpzCisrKyBiL3Rlc3RzL2Flcm9kZXNrLWNyZXctc3RhZmZpbmcudGVzdC5tanMKQEAgLTcsNyArNyw3IEBAIGZ1bmN0aW9uIGxvYWRFbmdpbmUoKSB7CiAgIGNvbnN0IHNvdXJjZSA9IGZzLnJlYWRGaWxlU3luYyhuZXcgVVJMKCcuLi9hZXJvZGVzay5qc3gnLCBpbXBvcnQubWV0YS51cmwpLCAndXRmOCcpOwogICBjb25zdCBzdGFydCA9IHNvdXJjZS5pbmRleE9mKCcvLyA9PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT1cbi8vIFNJTVVMQVRJT04gRU5HSU5FJyk7CiAgIGNvbnN0IGVuZCA9IHNvdXJjZS5pbmRleE9mKCcvLyA9PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT1cbi8vIFVJIExBWUVSJyk7Ci0gIGNvbnN0IGVuZ2luZSA9IHNvdXJjZS5zbGljZShzdGFydCwgZW5kKSArIGBcbjtnbG9iYWxUaGlzLl9fY3JldyA9IHtcbiAgICBBSVJDUkFGVF9UWVBFUywgREFZX01TLCBXRUVLX01TLCBuZXdHYW1lLFxuICAgIGFjdGlvbkhpcmVDcmV3OiB0eXBlb2YgYWN0aW9uSGlyZUNyZXcgPT09ICdmdW5jdGlvbicgPyBhY3Rpb25IaXJlQ3JldyA6IHVuZGVmaW5lZCxcbiAgICBjcmV3TGVnYWxMaW1pdHM6IHR5cGVvZiBjcmV3TGVnYWxMaW1pdHMgPT09ICdmdW5jdGlvbicgPyBjcmV3TGVnYWxMaW1pdHMgOiB1bmRlZmluZWQsXG4gICAgY3Jld0NhcGFjaXR5Rm9yUGVyaW9kOiB0eXBlb2YgY3Jld0NhcGFjaXR5Rm9yUGVyaW9kID09PSAnZnVuY3Rpb24nID8gY3Jld0NhcGFjaXR5Rm9yUGVyaW9kIDogdW5kZWZpbmVkLFxuICAgIGNyZWF0ZUNyZXdQZXJpb2RMZWRnZXI6IHR5cGVvZiBjcmVhdGVDcmV3UGVyaW9kTGVkZ2VyID09PSAnZnVuY3Rpb24nID8gY3JlYXRlQ3Jld1BlcmlvZExlZGdlciA6IHVuZGVmaW5lZCxcbiAgICByZXNlcnZlQ3Jld0ZvclJvdGF0aW9uOiB0eXBlb2YgcmVzZXJ2ZUNyZXdGb3JSb3RhdGlvbiA9PT0gJ2Z1bmN0aW9uJyA/IHJlc2VydmVDcmV3Rm9yUm90YXRpb24gOiB1bmRlZmluZWQsXG4gICAgcHJvY2Vzc0NyZXdQaXBlbGluZTogdHlwZW9mIHByb2Nlc3NDcmV3UGlwZWxpbmUgPT09ICdmdW5jdGlvbicgPyBwcm9jZXNzQ3Jld1BpcGVsaW5lIDogdW5kZWZpbmVkXG4gIH07YDsKKyAgY29uc3QgZW5naW5lID0gc291cmNlLnNsaWNlKHN0YXJ0LCBlbmQpICsgYFxuO2dsb2JhbFRoaXMuX19jcmV3ID0ge1xuICAgIEFJUkNSQUZUX1RZUEVTLCBEQVlfTVMsIFdFRUtfTVMsIG5ld0dhbWUsXG4gICAgYWN0aW9uSGlyZUNyZXc6IHR5cGVvZiBhY3Rpb25IaXJlQ3JldyA9PT0gJ2Z1bmN0aW9uJyA/IGFjdGlvbkhpcmVDcmV3IDogdW5kZWZpbmVkLFxuICAgIGVuc3VyZVN0YWZmaW5nOiB0eXBlb2YgZW5zdXJlU3RhZmZpbmcgPT09ICdmdW5jdGlvbicgPyBlbnN1cmVTdGFmZmluZyA6IHVuZGVmaW5lZCxcbiAgICBjcmV3TGVnYWxMaW1pdHM6IHR5cGVvZiBjcmV3TGVnYWxMaW1pdHMgPT09ICdmdW5jdGlvbicgPyBjcmV3TGVnYWxMaW1pdHMgOiB1bmRlZmluZWQsXG4gICAgY3Jld0NhcGFjaXR5Rm9yUGVyaW9kOiB0eXBlb2YgY3Jld0NhcGFjaXR5Rm9yUGVyaW9kID09PSAnZnVuY3Rpb24nID8gY3Jld0NhcGFjaXR5Rm9yUGVyaW9kIDogdW5kZWZpbmVkLFxuICAgIGNyZWF0ZUNyZXdQZXJpb2RMZWRnZXI6IHR5cGVvZiBjcmVhdGVDcmV3UGVyaW9kTGVkZ2VyID09PSAnZnVuY3Rpb24nID8gY3JlYXRlQ3Jld1BlcmlvZExlZGdlciA6IHVuZGVmaW5lZCxcbiAgICByZXNlcnZlQ3Jld0ZvclJvdGF0aW9uOiB0eXBlb2YgcmVzZXJ2ZUNyZXdGb3JSb3RhdGlvbiA9PT0gJ2Z1bmN0aW9uJyA/IHJlc2VydmVDcmV3Rm9yUm90YXRpb24gOiB1bmRlZmluZWQsXG4gICAgcHJvY2Vzc0NyZXdQaXBlbGluZTogdHlwZW9mIHByb2Nlc3NDcmV3UGlwZWxpbmUgPT09ICdmdW5jdGlvbicgPyBwcm9jZXNzQ3Jld1BpcGVsaW5lIDogdW5kZWZpbmVkXG4gIH07YDsKICAgY29uc3QgY29udGV4dCA9IHZtLmNyZWF0ZUNvbnRleHQoeyBjb25zb2xlLCBEYXRlLCBNYXRoLCBKU09OLCBJbnRsLCBzZXRUaW1lb3V0LCBjbGVhclRpbWVvdXQgfSk7CiAgIHZtLnJ1bkluQ29udGV4dChlbmdpbmUsIGNvbnRleHQsIHsgZmlsZW5hbWU6ICdhZXJvZGVzay1jcmV3LnZtLmpzJyB9KTsKICAgcmV0dXJuIGNvbnRleHQuX19jcmV3OwpAQCAtNjUsOCArNjUsMTEgQEAgdGVzdCgnY3JldyByZWNydWl0bWVudCBoYXMgYSBsZWFkIHRpbWUgYW5kIGRvZXMgbm90IGNyZWF0ZSBxdWFsaWZpZWQgc3RhZmYgaW5zdGEKICAgY29uc3QgcmVzdWx0ID0gRS5hY3Rpb25IaXJlQ3JldyhzdGF0ZSwgeyBwaWxvdHM6IDQsIGNhYmluQ3JldyA6IDggfSk7CiAgIGFzc2VydC5lcXVhbChyZXN1bHQuZXJyb3IsIG51bGwpOwogICBhc3NlcnQuZXF1YWwocmVzdWx0LnN0YXRlLnN0YWZmaW5nLnBpbG90cywgYmVmb3JlKTsKLSAgYXNzZXJ0LmVxdWFsKHJlc3VsdC5zdGF0ZS5zdGFmZmluZy5waXBlbGluZS5sZW5ndGgsIDEpOwotICBhc3NlcnQub2socmVzdWx0LnN0YXRlLnN0YWZmaW5nLnBpcGVsaW5lWzBdLmF2YWlsYWJsZUF0ID4gcmVzdWx0LnN0YXRlLm1ldGEubGFzdFByb2Nlc3NlZEF0KTsKKyAgYXNzZXJ0LmVxdWFsKHJlc3VsdC5zdGF0ZS5zdGFmZmluZy5waXBlbGluZS5sZW5ndGgsIDIpOworICBjb25zdCBwaWxvdEJhdGNoID0gcmVzdWx0LnN0YXRlLnN0YWZmaW5nLnBpcGVsaW5lLmZpbmQoYmF0Y2ggPT4gYmF0Y2gucGlsb3RzKTsKKyAgY29uc3QgY2FiaW5CYXRjaCA9IHJlc3VsdC5zdGF0ZS5zdGFmZmluZy5waXBlbGluZS5maW5kKGJhdGNoID0+IGJhdGNoLmNhYmluQ3Jldyk7CisgIGFzc2VydC5vayhwaWxvdEJhdGNoLmF2YWlsYWJsZUF0ID4gY2FiaW5CYXRjaC5hdmFpbGFibGVBdCk7CisgIGFzc2VydC5vayhjYWJpbkJhdGNoLmF2YWlsYWJsZUF0ID4gcmVzdWx0LnN0YXRlLm1ldGEubGFzdFByb2Nlc3NlZEF0KTsKIH0pOwogCnRlc3QoJ3F1YWxpZmllZCByZWNydWl0cyBlbnRlciB0aGUgYWN0aXZlIGVzdGFibGlzaG1lbnQgb25seSBhZnRlciB0aGVpciBwaXBlbGluZSBkYXRlJywgKCkgPT4gewpAQCAtNzcsMTEgKzgwLDMxIEBAIHRlc3QoJ3F1YWxpZmllZCByZWNydWl0cyBlbnRlciB0aGUgYWN0aXZlIGVzdGFibGlzaG1lbnQgb25seSBhZnRlciB0aGVpciBwaXBlbGluCiAgIHN0YXRlID0gcmVzdWx0LnN0YXRlOwogICBjb25zdCBiZWZvcmVQaWxvdHMgPSBzdGF0ZS5zdGFmZmluZy5waWxvdHM7CiAgIGNvbnN0IGJlZm9yZUNhYmluID0gc3RhdGUuc3RhZmZpbmcuY2FiaW5DcmV3OwotICBjb25zdCBkZWxpdmVyeUF0ID0gc3RhdGUuc3RhZmZpbmcucGlwZWxpbmVbMF0uYXZhaWxhYmxlQXQ7Ci0gIEUucHJvY2Vzc0NyZXdQaXBlbGluZShzdGF0ZSwgZGVsaXZlcnlBdCAtIDEpOworICBjb25zdCBmaXJzdERlbGl2ZXJ5QXQgPSBNYXRoLm1pbiguLi5zdGF0ZS5zdGFmZmluZy5waXBlbGluZS5tYXAoYmF0Y2ggPT4gYmF0Y2guYXZhaWxhYmxlQXQpKTsKKyAgY29uc3QgZmluYWxEZWxpdmVyeUF0ID0gTWF0aC5tYXgoLi4uc3RhdGUuc3RhZmZpbmcucGlwZWxpbmUubWFwKGJhdGNoID0+IGJhdGNoLmF2YWlsYWJsZUF0KSk7CisgIEUucHJvY2Vzc0NyZXdQaXBlbGluZShzdGF0ZSwgZmlyc3REZWxpdmVyeUF0IC0gMSk7CiAgIGFzc2VydC5lcXVhbChzdGF0ZS5zdGFmZmluZy5waWxvdHMsIGJlZm9yZVBpbG90cyk7Ci0gIEUucHJvY2Vzc0NyZXdQaXBlbGluZShzdGF0ZSwgZGVsaXZlcnlBdCk7CisgIGFzc2VydC5lcXVhbChzdGF0ZS5zdGFmZmluZy5jYWJpbkNyZXcsIGJlZm9yZUNhYmluKTsKKyAgRS5wcm9jZXNzQ3Jld1BpcGVsaW5lKHN0YXRlLCBmaXJzdERlbGl2ZXJ5QXQpOworICBhc3NlcnQuZXF1YWwoc3RhdGUuc3RhZmZpbmcucGlsb3RzLCBiZWZvcmVQaWxvdHMpOworICBhc3NlcnQuZXF1YWwoc3RhdGUuc3RhZmZpbmcuY2FiaW5DcmV3LCBiZWZvcmVDYWJpbiArIDQpOworICBFLnByb2Nlc3NDcmV3UGlwZWxpbmUoc3RhdGUsIGZpbmFsRGVsaXZlcnlBdCk7CiAgIGFzc2VydC5lcXVhbChzdGF0ZS5zdGFmZmluZy5waWxvdHMsIGJlZm9yZVBpbG90cyArIDIpOwogICBhc3NlcnQuZXF1YWwoc3RhdGUuc3RhZmZpbmcuY2FiaW5DcmV3LCBiZWZvcmVDYWJpbiArIDQpOwogICBhc3NlcnQuZXF1YWwoc3RhdGUuc3RhZmZpbmcu cGlwZWxpbmUubGVuZ3RoLCAwKTsKIH0pOworCit0ZXN0KCdsZWdhY3kgc2F2ZXMgd2l0aG91dCBzdGFmZmluZyBhcmUgbWlncmF0ZWQgZnJvbSBjdXJyZW50IGZsZWV0IGVzdGFibGlzaG1lbnQnLCAoKSA9PiB7CisgIGFzc2VydC5lcXVhbCh0eXBlb2YgRS5lbnN1cmVTdGFmZmluZywgJ2Z1bmN0aW9uJyk7CisgIGNvbnN0IHN0YXRlID0gRS5uZXdHYW1lKCdMZWdhY3kgQ3JldyBBaXInLCAnQ0RHJywgMTQwNik7CisgIHN0YXRlLmZsZWV0ID0gWworICAgIHsgaWQ6ICdBQzEnLCB0eXBlSWQ6ICdBMzUwLTEwMDAnLCBzdGF0dXM6ICdBQ1RJVkUnIH0sCisgICAgeyBpZDogJ0FDMicsIHR5cGVJZDogJ0EzNTAtMTAwMCcsIHN0YXR1czogJ0FDVElWRScgfSwKKyAgXTsKKyAgZGVsZXRlIHN0YXRlLnN0YWZmaW5nOworICBjb25zdCBzdGFmZmluZyA9IEUuZW5zdXJlU3RhZmZpbmcoc3RhdGUpOworICBhc3NlcnQub2soc3RhZmZpbmcucGlsb3RzID4gMTIpOworICBhc3NlcnQub2soc3RhZmZpbmcuY2FiaW5DcmV3ID4gMjQpOworICBhc3NlcnQub2soQXJyYXkuaXNBcnJheShzdGFmZmluZy5waXBlbGluZSkpOworICBhc3NlcnQuZXF1YWwoc3RhZmZpbmcucGlwZWxpbmUubGVuZ3RoLCAwKTsKK30pOwpkaWZmIC0tZ2l0IGEvdGVzdHMvYWVyb2Rlc2stZW5naW5lLnRlc3QubWpzIGIvdGVzdHMvYWVyb2Rlc2stZW5naW5lLnRlc3QubWpzCmluZGV4IDcxZmEwZWIuLjhjYmU3ZTcgMTAwNjQ0Ci0tLSBhL3Rlc3RzL2Flcm9kZXNrLWVuZ2luZS50ZXN0Lm1qcworKysgYi90ZXN0cy9hZXJvZGVzay1lbmdpbmUudGVzdC5tanMKQEAgLTIwNiwxMiArMjA2LDEzIEBAIHRlc3QoJ29wZXJhdGVkIGZsaWdodCBob3VycyBhbmQgY3ljbGVzIGFyZSBkaXN0cmlidXRlZCBhY3Jvc3MgYXNzaWduZWQgYWlyY3JhZnQKICAgYXNzZXJ0LmVxdWFsKHRvdGFsQ3ljbGVzLCBvcGVyYXRlZCk7CiB9KTsKIAotdGVzdCgnbG9uZy1oYXVsIGNyZXcgY29zdCBhZGRzIGF1Z21lbnRlZCBzdGFmZmluZyB3aGVuIGR1dHkgZXhjZWVkcyBhIGJhc2ljIEZEUCBlbnZlbG9wZScsICgpID0+IHsKK3Rlc3QoJ2xvbmctaGF1bCBjcmV3IHZhcmlhYmxlIGNvc3QgaXMgbGltaXRlZCB0byBhd2F5LWZyb20tYmFzZSBvcGVyYXRpbmcgZXhwZW5zZXMnLCAoKSA9PiB7CiAgIGFzc2VydC5lcXVhbCh0eXBlb2YgRS5jcmV3Q29zdEZvck9wZXJhdGlvbnMsICdmdW5jdGlvbicpOwogICBjb25zdCB0eXBlID0gRS5BSVJDUkFGVF9UWVBFUy5maW5kKHQgPT4gdC5pZCA9PT0gJzc4Ny05Jyk7CiAgIGNvbnN0IHVuYXVnbWVudGVkTGluZWFyQ29zdCA9IHR5cGUuY3JldyAqIDk1ICogMTQ7CiAgIGNvbnN0IGxvbmdIYXVsQ29zdCA9IEUuY3Jld0Nvc3RGb3JPcGVyYXRpb25zKHR5cGUsIDE0LCAxKTsKLSAgYXNzZXJ0Lm9rKGxvbmdIYXVsQ29zdCA+IHVuYXVnbWVudGVkTGluZWFyQ29zdCAqIDEuMTUpOworICBhc3NlcnQub2sobG9uZ0hhdWxDb3N0ID4gMCk7CisgIGFzc2VydC5vayhsb25nSGF1bENvc3QgPCB1bmF1Z21lbnRlZExpbmVhckNvc3QpOwogfSk7CiAKIHRlc3QoJ3NjaGVkdWxlZCBtYWludGVuYW5jZSBpcyB0cmlnZ2VyZWQgYnkgYWNjdW11bGF0ZWQgaG91cnMgb3IgY3ljbGVzIHJhdGhlciB0aGFuIGNvbmRpdGlvbiBhbG9uZScsICgpID0+IHsK`;
+function replaceOnce(file, before, after) {
+  const path = file;
+  const source = fs.readFileSync(path, 'utf8');
+  const count = source.split(before).length - 1;
+  if (count !== 1) {
+    throw new Error(`${file}: expected one match, found ${count}`);
+  }
+  fs.writeFileSync(path, source.replace(before, after));
+}
 
-const patchPath = path.join(os.tmpdir(), 'aerodesk-coderabbit-crew-review-fixes.patch');
-const patch = Buffer.from(patchBase64.replace(/\s+/g, ''), 'base64').toString('utf8');
-fs.writeFileSync(patchPath, patch);
-execFileSync('git', ['apply', '--check', patchPath], { stdio: 'inherit' });
-execFileSync('git', ['apply', patchPath], { stdio: 'inherit' });
+replaceOnce('aerodesk.jsx', `function ensureStaffing(state) {
+  if (!state.staffing) {
+    state.staffing = {
+      pilots: CREW_DEFAULTS.pilots,
+      cabinCrew: CREW_DEFAULTS.cabinCrew,
+      reserveFraction: CREW_DEFAULTS.reserveFraction,
+      pipeline: [],
+    };
+  }
+  if (!Array.isArray(state.staffing.pipeline)) state.staffing.pipeline = [];
+  if (!Number.isFinite(state.staffing.reserveFraction)) state.staffing.reserveFraction = CREW_DEFAULTS.reserveFraction;
+  return state.staffing;
+}
+`, `function ensureStaffing(state) {
+  if (!state.staffing) {
+    const fleetCrew = (state.fleet || [])
+      .filter(f => f.status !== 'RETIRED')
+      .reduce((acc, f) => {
+        const type = aircraftType(f.typeId);
+        if (!type) return acc;
+        const crew = minimumOperatingCrew(type);
+        return {
+          pilots: acc.pilots + crew.flightDeck * 6,
+          cabinCrew: acc.cabinCrew + crew.cabin * 6,
+        };
+      }, { pilots: 0, cabinCrew: 0 });
+    state.staffing = {
+      pilots: Math.max(CREW_DEFAULTS.pilots, fleetCrew.pilots),
+      cabinCrew: Math.max(CREW_DEFAULTS.cabinCrew, fleetCrew.cabinCrew),
+      reserveFraction: CREW_DEFAULTS.reserveFraction,
+      pipeline: [],
+    };
+  }
+  if (!Array.isArray(state.staffing.pipeline)) state.staffing.pipeline = [];
+  if (!Number.isFinite(state.staffing.reserveFraction)) state.staffing.reserveFraction = CREW_DEFAULTS.reserveFraction;
+  if (!Number.isFinite(state.staffing.pilots)) state.staffing.pilots = CREW_DEFAULTS.pilots;
+  if (!Number.isFinite(state.staffing.cabinCrew)) state.staffing.cabinCrew = CREW_DEFAULTS.cabinCrew;
+  return state.staffing;
+}
+`);
+
+replaceOnce('aerodesk.jsx', `  const nowMs = s.meta?.lastProcessedAt || Date.now();
+  const leadDays = Math.max(
+    pilotCount ? CREW_DEFAULTS.pilotRecruitmentDays : 0,
+    cabinCount ? CREW_DEFAULTS.cabinRecruitmentDays : 0,
+  );
+  s.company.cash -= cost;
+  staffing.pipeline.push({ pilots: pilotCount, cabinCrew: cabinCount, cost, orderedAt: nowMs, availableAt: nowMs + leadDays * DAY_MS });
+  addLedger(s, s.meta.week, 'CREW_RECRUITMENT', -cost, 'Recrutement', 'Recrutement, contrôles et qualification équipage');
+`, `  const nowMs = s.meta?.lastProcessedAt || Date.now();
+  s.company.cash -= cost;
+  if (pilotCount) {
+    staffing.pipeline.push({
+      pilots: pilotCount,
+      cabinCrew: 0,
+      cost: pilotCount * CREW_DEFAULTS.pilotRecruitmentCostUSD,
+      orderedAt: nowMs,
+      availableAt: nowMs + CREW_DEFAULTS.pilotRecruitmentDays * DAY_MS,
+    });
+  }
+  if (cabinCount) {
+    staffing.pipeline.push({
+      pilots: 0,
+      cabinCrew: cabinCount,
+      cost: cabinCount * CREW_DEFAULTS.cabinRecruitmentCostUSD,
+      orderedAt: nowMs,
+      availableAt: nowMs + CREW_DEFAULTS.cabinRecruitmentDays * DAY_MS,
+    });
+  }
+  addLedger(s, s.meta.week, 'CREW_RECRUITMENT', -cost, 'Recrutement', 'Recrutement, contrôles et qualification équipage');
+`);
+
+replaceOnce('aerodesk.jsx', `  // Long sectors require augmented/rest-capable crewing and generate layover/per-diem expense.
+  const hourly = rosteredCrew * 95 * totalBlockHours * augmentation;
+  const perDiem = blockPerFlight >= 6 ? rosteredCrew * 75 * flights : 0;
+  const layover = blockPerFlight >= 10 ? rosteredCrew * 140 * flights : 0;
+  return hourly + perDiem + layover;
+`, `  // Base salaries are part of recurring payroll; flight operations carry only variable crew costs.
+  const augmentationPremium = rosteredCrew * 95 * totalBlockHours * Math.max(0, augmentation - 1);
+  const perDiem = blockPerFlight >= 6 ? rosteredCrew * 75 * flights : 0;
+  const layover = blockPerFlight >= 10 ? rosteredCrew * 140 * flights : 0;
+  return augmentationPremium + perDiem + layover;
+`);
+
+replaceOnce('tests/aerodesk-crew-staffing.test.mjs', `    actionHireCrew: typeof actionHireCrew === 'function' ? actionHireCrew : undefined,
+    crewLegalLimits: typeof crewLegalLimits === 'function' ? crewLegalLimits : undefined,
+`, `    actionHireCrew: typeof actionHireCrew === 'function' ? actionHireCrew : undefined,
+    ensureStaffing: typeof ensureStaffing === 'function' ? ensureStaffing : undefined,
+    crewLegalLimits: typeof crewLegalLimits === 'function' ? crewLegalLimits : undefined,
+`);
+
+replaceOnce('tests/aerodesk-crew-staffing.test.mjs', `  assert.equal(result.state.staffing.pipeline.length, 1);
+  assert.ok(result.state.staffing.pipeline[0].availableAt > result.state.meta.lastProcessedAt);
+`, `  assert.equal(result.state.staffing.pipeline.length, 2);
+  const pilotBatch = result.state.staffing.pipeline.find(batch => batch.pilots);
+  const cabinBatch = result.state.staffing.pipeline.find(batch => batch.cabinCrew);
+  assert.ok(pilotBatch.availableAt > cabinBatch.availableAt);
+  assert.ok(cabinBatch.availableAt > result.state.meta.lastProcessedAt);
+`);
+
+replaceOnce('tests/aerodesk-crew-staffing.test.mjs', `  const deliveryAt = state.staffing.pipeline[0].availableAt;
+  E.processCrewPipeline(state, deliveryAt - 1);
+  assert.equal(state.staffing.pilots, beforePilots);
+  E.processCrewPipeline(state, deliveryAt);
+  assert.equal(state.staffing.pilots, beforePilots + 2);
+  assert.equal(state.staffing.cabinCrew, beforeCabin + 4);
+  assert.equal(state.staffing.pipeline.length, 0);
+});
+`, `  const firstDeliveryAt = Math.min(...state.staffing.pipeline.map(batch => batch.availableAt));
+  const finalDeliveryAt = Math.max(...state.staffing.pipeline.map(batch => batch.availableAt));
+  E.processCrewPipeline(state, firstDeliveryAt - 1);
+  assert.equal(state.staffing.pilots, beforePilots);
+  assert.equal(state.staffing.cabinCrew, beforeCabin);
+  E.processCrewPipeline(state, firstDeliveryAt);
+  assert.equal(state.staffing.pilots, beforePilots);
+  assert.equal(state.staffing.cabinCrew, beforeCabin + 4);
+  E.processCrewPipeline(state, finalDeliveryAt);
+  assert.equal(state.staffing.pilots, beforePilots + 2);
+  assert.equal(state.staffing.cabinCrew, beforeCabin + 4);
+  assert.equal(state.staffing.pipeline.length, 0);
+});
+
+test('legacy saves without staffing are migrated from current fleet establishment', () => {
+  assert.equal(typeof E.ensureStaffing, 'function');
+  const state = E.newGame('Legacy Crew Air', 'CDG', 1406);
+  state.fleet = [
+    { id: 'AC1', typeId: 'A350-1000', status: 'ACTIVE' },
+    { id: 'AC2', typeId: 'A350-1000', status: 'ACTIVE' },
+  ];
+  delete state.staffing;
+  const staffing = E.ensureStaffing(state);
+  assert.ok(staffing.pilots > 12);
+  assert.ok(staffing.cabinCrew > 24);
+  assert.ok(Array.isArray(staffing.pipeline));
+  assert.equal(staffing.pipeline.length, 0);
+});
+`);
+
+replaceOnce('tests/aerodesk-engine.test.mjs', `test('long-haul crew cost adds augmented staffing when duty exceeds a basic FDP envelope', () => {
+  assert.equal(typeof E.crewCostForOperations, 'function');
+  const type = E.AIRCRAFT_TYPES.find(t => t.id === '787-9');
+  const unaugmentedLinearCost = type.crew * 95 * 14;
+  const longHaulCost = E.crewCostForOperations(type, 14, 1);
+  assert.ok(longHaulCost > unaugmentedLinearCost * 1.15);
+});
+`, `test('long-haul crew variable cost is limited to away-from-base operating expenses', () => {
+  assert.equal(typeof E.crewCostForOperations, 'function');
+  const type = E.AIRCRAFT_TYPES.find(t => t.id === '787-9');
+  const unaugmentedLinearCost = type.crew * 95 * 14;
+  const longHaulCost = E.crewCostForOperations(type, 14, 1);
+  assert.ok(longHaulCost > 0);
+  assert.ok(longHaulCost < unaugmentedLinearCost);
+});
+`);
