@@ -36,9 +36,9 @@ test('payload-range limits sellable seats near published maximum range', () => {
 test('market products expose mission-limited passenger capacity instead of nominal seats', () => {
   let state = E.newGame('Payload Air', 'LHR', 771);
   state.fleet.push({ id: 'A1', typeId: 'A321XLR', ownership: 'OWNED', ageWeeks: 0, cycles: 0, flightHours: 0, condition: 100, status: 'ACTIVE', assignedRouteId: null });
-  state = E.actionOpenRoute(state, { originId: 'LHR', destId: 'LAX', aircraftTypeId: 'A321XLR', frequencyPerWeek: 3, fareStrategy: 'COMPETITIVE', departMinute: 9 * 60 });
+  state = E.actionOpenRoute(state, { originId: 'LHR', destId: 'MIA', aircraftTypeId: 'A321XLR', frequencyPerWeek: 3, fareStrategy: 'COMPETITIVE', departMinute: 9 * 60 });
   state = E.actionAssignAircraft(state, 'A1', state.routes.at(-1).id);
-  const product = E.buildPlayerProducts(state, 'LHR', 'LAX').find(p => p.legs === 1);
+  const product = E.buildPlayerProducts(state, 'LHR', 'MIA').find(p => p.legs === 1);
   assert.ok(product);
   assert.ok(product.seats < type('A321XLR').seats);
   assert.ok(product.seats > 0);
