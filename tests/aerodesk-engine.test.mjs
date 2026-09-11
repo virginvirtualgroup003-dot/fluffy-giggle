@@ -10,7 +10,7 @@ function loadEngine() {
   assert.notEqual(start, -1, 'simulation engine marker must exist');
   assert.notEqual(end, -1, 'UI layer marker must exist');
 
-  const engine = source.slice(start, end) + `\n;globalThis.__engine = {\n    AIRPORTS, AIRCRAFT_TYPES, FARE_STRATEGIES, AERODESK_V3, WEEK_MS, DAY_MS,\n    seededRandom, newGame, actionOpenRoute, actionAssignAircraft,\n    buildPlayerProducts, makeProductFromRoute, productFareForSegment, productUtility,\n    computeMarketOutcome, adaptYield, realTimeTick, checkBankruptcy, runCompetitorAI,\n    scheduledDeparturesBetween, seasonalFactor,\n    validateRoutePlan: typeof validateRoutePlan === 'function' ? validateRoutePlan : undefined,\n    buildOperationalPlan: typeof buildOperationalPlan === 'function' ? buildOperationalPlan : undefined\n  };`;
+  const engine = source.slice(start, end) + `\n;globalThis.__engine = {\n    AIRPORTS, AIRCRAFT_TYPES, FARE_STRATEGIES, AERODESK_V3, WEEK_MS, DAY_MS,\n    seededRandom, newGame, actionOpenRoute, actionAssignAircraft,\n    buildPlayerProducts, makeProductFromRoute, productFareForSegment, productUtility,\n    computeMarketOutcome, adaptYield, realTimeTick, checkBankruptcy, runCompetitorAI,\n    scheduledDeparturesBetween, seasonalFactor, blockTimeHours, distanceBetween,\n    validateRoutePlan: typeof validateRoutePlan === 'function' ? validateRoutePlan : undefined,\n    buildOperationalPlan: typeof buildOperationalPlan === 'function' ? buildOperationalPlan : undefined,\n    crewCostForOperations: typeof crewCostForOperations === 'function' ? crewCostForOperations : undefined,\n    applyAircraftUsage: typeof applyAircraftUsage === 'function' ? applyAircraftUsage : undefined,\n    v3ApplyCarbonCost: typeof v3ApplyCarbonCost === 'function' ? v3ApplyCarbonCost : undefined\n  };`;
 
   const context = vm.createContext({ console, Date, Math, JSON, Intl, setTimeout, clearTimeout });
   vm.runInContext(engine, context, { filename: 'aerodesk-engine.vm.js' });
@@ -180,4 +180,66 @@ test('aircraft utilisation constrains impossible schedules and creates operation
   const plan = E.buildOperationalPlan(state, route, from, to, E.seededRandom(12));
   assert.ok(plan.scheduledFlights > plan.operatedFlights);
   assert.ok(plan.cancelledFlights > 0);
+});
+
+test('operated flight hours and cycles are distributed across assigned aircraft instead of duplicated on every tail', () => {
+  const start = Date.UTC(2026, 0, 5, 0, 0);
+  let state = stateWithPlayerRoute();
+  const route = state.routes[0];
+  state.fleet.push({
+    id: 'AC2', typeId: 'A220-300', ownership: 'OWNED', ageWeeks: 0,
+    cycles: 0, flightHours: 0, condition: 100, status: 'ACTIVE', assignedRouteId: route.id,
+  });
+  state.meta.lastProcessedAt = start;
+  state.meta.currentTime = new Date(start).toISOString();
+  state.fleet.forEach(f => { f.flightHours = 0; f.cycles = 0; });
+
+  const next = E.realTimeTick(state, start + E.WEEK_MS);
+  const operated = next.routes[0].history.reduce((sum, item) => sum + (item.operatedFlights || 0), 0);
+  const type = E.AIRCRAFT_TYPES.find(t => t.id === route.aircraftTypeId);
+  const blockPerFlight = E.blockTimeHours(E.distanceBetween(route.originId, route.destId), type.cruiseKmh);
+  const assigned = next.fleet.filter(f => f.assignedRouteId === route.id);
+  const totalHours = assigned.reduce((sum, f) => sum + f.flightHours, 0);
+  const totalCycles = assigned.reduce((sum, f) => sum + f.cycles, 0);
+
+  assert.ok(Math.abs(totalHours - operated * blockPerFlight) < 0.01);
+  assert.equal(totalCycles, operated);
+});
+
+test('long-haul crew cost adds augmented staffing when duty exceeds a basic FDP envelope', () => {
+  assert.equal(typeof E.crewCostForOperations, 'function');
+  const type = E.AIRCRAFT_TYPES.find(t => t.id === '787-9');
+  const unaugmentedLinearCost = type.crew * 95 * 14;
+  const longHaulCost = E.crewCostForOperations(type, 14, 1);
+  assert.ok(longHaulCost > unaugmentedLinearCost * 1.15);
+});
+
+test('scheduled maintenance is triggered by accumulated hours or cycles rather than condition alone', () => {
+  assert.equal(typeof E.applyAircraftUsage, 'function');
+  const state = E.newGame('Maintenance Air', 'CDG', 777);
+  const type = E.AIRCRAFT_TYPES.find(t => t.id === 'A220-300');
+  const aircraft = {
+    id: 'ACM', typeId: type.id, ownership: 'OWNED', ageWeeks: 10,
+    cycles: 395, flightHours: 645, condition: 88, status: 'ACTIVE', assignedRouteId: null,
+    nextScheduledCheckHours: 650, nextScheduledCheckCycles: 400,
+  };
+  state.fleet.push(aircraft);
+  const now = Date.UTC(2026, 0, 10, 12, 0);
+  const result = E.applyAircraftUsage(state, aircraft, type, 10, 12, now, () => 0.99);
+  assert.equal(aircraft.status, 'MAINTENANCE');
+  assert.ok(aircraft.maintUntil > now);
+  assert.ok(result.maintenanceCost > 0);
+});
+
+test('carbon compliance cost is scoped to covered European operations and converted into the USD base currency', () => {
+  assert.equal(typeof E.v3ApplyCarbonCost, 'function');
+  const euState = E.newGame('EU Air', 'CDG', 888);
+  euState.market.fx = { EURUSD: 1.10 };
+  const euCost = E.v3ApplyCarbonCost(euState, 1000, 'CDG', 'FRA');
+  assert.ok(euCost > 0);
+
+  const longHaulState = E.newGame('Global Air', 'CDG', 889);
+  longHaulState.market.fx = { EURUSD: 1.10 };
+  const outsideScopeCost = E.v3ApplyCarbonCost(longHaulState, 1000, 'CDG', 'JFK');
+  assert.equal(outsideScopeCost, 0);
 });
