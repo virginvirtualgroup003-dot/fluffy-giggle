@@ -1,13 +1,12 @@
 import fs from 'node:fs';
 
 function replaceOnce(file, before, after) {
-  const path = file;
-  const source = fs.readFileSync(path, 'utf8');
+  const source = fs.readFileSync(file, 'utf8');
   const count = source.split(before).length - 1;
   if (count !== 1) {
     throw new Error(`${file}: expected one match, found ${count}`);
   }
-  fs.writeFileSync(path, source.replace(before, after));
+  fs.writeFileSync(file, source.replace(before, after));
 }
 
 replaceOnce('aerodesk.jsx', `function ensureStaffing(state) {
@@ -58,7 +57,7 @@ replaceOnce('aerodesk.jsx', `  const nowMs = s.meta?.lastProcessedAt || Date.now
   );
   s.company.cash -= cost;
   staffing.pipeline.push({ pilots: pilotCount, cabinCrew: cabinCount, cost, orderedAt: nowMs, availableAt: nowMs + leadDays * DAY_MS });
-  addLedger(s, s.meta.week, 'CREW_RECRUITMENT', -cost, 'Recrutement', 'Recrutement, contrôles et qualification équipage');
+  addLedger(s, s.meta.week, 'CREW_RECRUITMENT', -cost, 'Recrutement, contrôles et qualification équipage');
 `, `  const nowMs = s.meta?.lastProcessedAt || Date.now();
   s.company.cash -= cost;
   if (pilotCount) {
@@ -79,7 +78,7 @@ replaceOnce('aerodesk.jsx', `  const nowMs = s.meta?.lastProcessedAt || Date.now
       availableAt: nowMs + CREW_DEFAULTS.cabinRecruitmentDays * DAY_MS,
     });
   }
-  addLedger(s, s.meta.week, 'CREW_RECRUITMENT', -cost, 'Recrutement', 'Recrutement, contrôles et qualification équipage');
+  addLedger(s, s.meta.week, 'CREW_RECRUITMENT', -cost, 'Recrutement, contrôles et qualification équipage');
 `);
 
 replaceOnce('aerodesk.jsx', `  // Long sectors require augmented/rest-capable crewing and generate layover/per-diem expense.
