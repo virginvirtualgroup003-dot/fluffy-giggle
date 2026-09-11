@@ -7,7 +7,7 @@ function loadEngine() {
   const source = fs.readFileSync(new URL('../aerodesk.jsx', import.meta.url), 'utf8');
   const start = source.indexOf('// =============================================================================\n// SIMULATION ENGINE');
   const end = source.indexOf('// =============================================================================\n// UI LAYER');
-  const engine = source.slice(start, end) + `\n;globalThis.__crew = {\n    AIRCRAFT_TYPES, DAY_MS, WEEK_MS, newGame, actionHireCrew,\n    crewLegalLimits: typeof crewLegalLimits === 'function' ? crewLegalLimits : undefined,\n    crewCapacityForPeriod: typeof crewCapacityForPeriod === 'function' ? crewCapacityForPeriod : undefined,\n    createCrewPeriodLedger: typeof createCrewPeriodLedger === 'function' ? createCrewPeriodLedger : undefined,\n    reserveCrewForRotation: typeof reserveCrewForRotation === 'function' ? reserveCrewForRotation : undefined,\n    processCrewPipeline: typeof processCrewPipeline === 'function' ? processCrewPipeline : undefined\n  };`;
+  const engine = source.slice(start, end) + `\n;globalThis.__crew = {\n    AIRCRAFT_TYPES, DAY_MS, WEEK_MS, newGame,\n    actionHireCrew: typeof actionHireCrew === 'function' ? actionHireCrew : undefined,\n    crewLegalLimits: typeof crewLegalLimits === 'function' ? crewLegalLimits : undefined,\n    crewCapacityForPeriod: typeof crewCapacityForPeriod === 'function' ? crewCapacityForPeriod : undefined,\n    createCrewPeriodLedger: typeof createCrewPeriodLedger === 'function' ? createCrewPeriodLedger : undefined,\n    reserveCrewForRotation: typeof reserveCrewForRotation === 'function' ? reserveCrewForRotation : undefined,\n    processCrewPipeline: typeof processCrewPipeline === 'function' ? processCrewPipeline : undefined\n  };`;
   const context = vm.createContext({ console, Date, Math, JSON, Intl, setTimeout, clearTimeout });
   vm.runInContext(engine, context, { filename: 'aerodesk-crew.vm.js' });
   return context.__crew;
@@ -59,6 +59,7 @@ test('shared crew ledger refuses rotations once finite pilot or cabin capacity i
 });
 
 test('crew recruitment has a lead time and does not create qualified staff instantly', () => {
+  assert.equal(typeof E.actionHireCrew, 'function');
   const state = E.newGame('Crew Air', 'CDG', 1404);
   const before = state.staffing.pilots;
   const result = E.actionHireCrew(state, { pilots: 4, cabinCrew: 8 });
@@ -69,6 +70,8 @@ test('crew recruitment has a lead time and does not create qualified staff insta
 });
 
 test('qualified recruits enter the active establishment only after their pipeline date', () => {
+  assert.equal(typeof E.actionHireCrew, 'function');
+  assert.equal(typeof E.processCrewPipeline, 'function');
   let state = E.newGame('Crew Air', 'CDG', 1405);
   const result = E.actionHireCrew(state, { pilots: 2, cabinCrew: 4 });
   state = result.state;
