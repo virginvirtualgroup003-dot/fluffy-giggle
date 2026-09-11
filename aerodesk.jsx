@@ -406,7 +406,7 @@ function newGame(companyName, homeBaseId, rngSeed) {
     version: 3,
     meta: { week: 1, year: new Date().getUTCFullYear(), weekOfYear: getISOWeek(new Date()), createdAt: Date.now(), lastProcessedAt: Date.now(), currentTime: new Date().toISOString(), rngSeed: rngSeed || Date.now() % 100000, realTime: true },
     company: {
-      name: companyName, homeBase: homeBaseId, cash: 45e6, reputation: 50, otp: 88,
+      name: companyName, homeBase: homeBaseId, cash: 45e6, currency: 'USD', reputation: 50, otp: 88,
       founded: true, bankrupt: false, nextAircraftSerial: 1, nextRouteSerial: 1,
     },
     fleet: [],
@@ -437,6 +437,7 @@ function newGame(companyName, homeBaseId, rngSeed) {
     market: {
       competitors,
       fuelPrice: 0.82,
+      fx: { EURUSD: 1.08 },
       macro: { demandIndex: 1.0, fuelTrend: 0, cycle: 'NORMAL' },
       events: [],
     },
@@ -716,14 +717,78 @@ function addLedger(state, week, category, amount, note) {
 
 const AERODESK_V3 = {
   ancillaryRate: 0.14,
-  laborDailyBaseEUR: 1800,
-  laborPerAircraftDailyEUR: 520,
-  laborPerRouteDailyEUR: 180,
+  laborDailyBaseUSD: 1800,
+  laborPerAircraftDailyUSD: 520,
+  laborPerRouteDailyUSD: 180,
   insuranceAnnualRate: 0.008,
   carbonEURPerTonneCO2: 90,
   co2KgPerLiterJetA: 2.52,
   airportInflationAnnual: 0.025,
 };
+
+
+const EUROPEAN_CARBON_MARKET_AIRPORTS = new Set(['LHR', 'CDG', 'FRA', 'AMS', 'MAD', 'FCO']);
+const SCHEDULED_CHECK_INTERVAL_HOURS = 650;
+const SCHEDULED_CHECK_INTERVAL_CYCLES = 400;
+const SCHEDULED_CHECK_DURATION_HOURS = 18;
+
+function crewCostForOperations(type, totalBlockHours, flights) {
+  if (!flights || totalBlockHours <= 0) return 0;
+  const blockPerFlight = totalBlockHours / flights;
+  const dutyHours = blockPerFlight + 1.5; // report, taxi/turn and post-flight duty proxy
+  let augmentation = 1.0;
+  if (dutyHours > 17) augmentation = 1.8;
+  else if (dutyHours > 15) augmentation = 1.5;
+  else if (dutyHours > 13) augmentation = 1.2;
+
+  // Long sectors require augmented/rest-capable crewing and generate layover/per-diem expense.
+  const hourly = type.crew * 95 * totalBlockHours * augmentation;
+  const perDiem = blockPerFlight >= 6 ? type.crew * 75 * flights : 0;
+  const layover = blockPerFlight >= 10 ? type.crew * 140 * flights : 0;
+  return hourly + perDiem + layover;
+}
+
+function applyAircraftUsage(state, aircraft, type, flownCycles, flownBlockHours, nowMs, rng = Math.random) {
+  const previousHours = aircraft.flightHours || 0;
+  const previousCycles = aircraft.cycles || 0;
+  if (!aircraft.nextScheduledCheckHours) {
+    aircraft.nextScheduledCheckHours = (Math.floor(previousHours / SCHEDULED_CHECK_INTERVAL_HOURS) + 1) * SCHEDULED_CHECK_INTERVAL_HOURS;
+  }
+  if (!aircraft.nextScheduledCheckCycles) {
+    aircraft.nextScheduledCheckCycles = (Math.floor(previousCycles / SCHEDULED_CHECK_INTERVAL_CYCLES) + 1) * SCHEDULED_CHECK_INTERVAL_CYCLES;
+  }
+
+  aircraft.flightHours = previousHours + flownBlockHours;
+  aircraft.cycles = previousCycles + flownCycles;
+  aircraft.condition = clamp(aircraft.condition - flownBlockHours * 0.035 - flownCycles * 0.025, 10, 100);
+
+  const scheduledDue =
+    aircraft.flightHours >= aircraft.nextScheduledCheckHours ||
+    aircraft.cycles >= aircraft.nextScheduledCheckCycles;
+  let maintenanceCost = 0;
+  let scheduled = false;
+
+  if (scheduledDue) {
+    scheduled = true;
+    aircraft.status = 'MAINTENANCE';
+    aircraft.maintUntil = nowMs + SCHEDULED_CHECK_DURATION_HOURS * 3600000;
+    maintenanceCost = type.maintPerHour * SCHEDULED_CHECK_DURATION_HOURS;
+    while (aircraft.nextScheduledCheckHours <= aircraft.flightHours) aircraft.nextScheduledCheckHours += SCHEDULED_CHECK_INTERVAL_HOURS;
+    while (aircraft.nextScheduledCheckCycles <= aircraft.cycles) aircraft.nextScheduledCheckCycles += SCHEDULED_CHECK_INTERVAL_CYCLES;
+    state.log.push({ week: state.meta.week, type: 'MAINT', text: `${aircraft.id} entre en visite programmée après seuil heures/cycles.` });
+  } else if (aircraft.condition < 65 && flownCycles > 0) {
+    const perCycleRisk = 0.001 + Math.max(0, 65 - aircraft.condition) * 0.00035;
+    const unscheduledRisk = 1 - Math.pow(1 - perCycleRisk, flownCycles);
+    if (rng() < unscheduledRisk) {
+      aircraft.status = 'MAINTENANCE';
+      aircraft.maintUntil = nowMs + 2 * DAY_MS;
+      maintenanceCost = type.maintPerHour * 25;
+      state.log.push({ week: state.meta.week, type: 'MAINT', text: `${aircraft.id} est immobilisé pour maintenance non programmée.` });
+    }
+  }
+
+  return { maintenanceCost, scheduled };
+}
 
 function v3EnsureFinance(state) {
   state.finance = state.finance || {};
@@ -743,9 +808,9 @@ function v3ProcessRecurringCosts(state, elapsedMs) {
 
   // Labor is modeled as a continuous operating expense rather than a weekly click.
   const labor =
-    (AERODESK_V3.laborDailyBaseEUR +
-      aircraftCount * AERODESK_V3.laborPerAircraftDailyEUR +
-      activeRoutes * AERODESK_V3.laborPerRouteDailyEUR) * days;
+    (AERODESK_V3.laborDailyBaseUSD +
+      aircraftCount * AERODESK_V3.laborPerAircraftDailyUSD +
+      activeRoutes * AERODESK_V3.laborPerRouteDailyUSD) * days;
 
   // Insurance is tied to the current fleet replacement value.
   const insuredValue = fleetValue(state);
@@ -764,11 +829,17 @@ function v3AddAncillaryRevenue(state, passengerRevenue) {
   return ancillary;
 }
 
-function v3ApplyCarbonCost(state, fuelLiters) {
+function v3ApplyCarbonCost(state, fuelLiters, originId = null, destId = null) {
+  // Model direct allowance cost only for flights inside the covered European carbon market.
+  // Extra-European emissions remain tracked physically but are not charged a fictional flat ETS fee.
+  const covered = EUROPEAN_CARBON_MARKET_AIRPORTS.has(originId) && EUROPEAN_CARBON_MARKET_AIRPORTS.has(destId);
+  if (!covered) return 0;
   const tonnesCO2 = fuelLiters * AERODESK_V3.co2KgPerLiterJetA / 1000;
-  const cost = tonnesCO2 * AERODESK_V3.carbonEURPerTonneCO2;
-  v3BookAccounting(state, 'taxesExpense', cost);
-  return cost;
+  const eurCost = tonnesCO2 * AERODESK_V3.carbonEURPerTonneCO2;
+  const eurUsd = state.market?.fx?.EURUSD || 1.08;
+  const costUSD = eurCost * eurUsd;
+  v3BookAccounting(state, 'taxesExpense', costUSD);
+  return costUSD;
 }
 
 function v3GetPnl(state) {
@@ -938,7 +1009,7 @@ function processRealTimeDay(state, fromMs, toMs, rng) {
     }
     const fuelCost = fuelBurnLiters(dist, type) * flights * state.market.fuelPrice;
     const blockH = blockTimeHours(dist, type.cruiseKmh) * flights;
-    const crewCost = type.crew * 95 * blockH;
+    const crewCost = crewCostForOperations(type, blockH, flights);
     const cond = avgConditionForRoute(state, route);
     const ageMult = clamp(1.25 + (100 - cond) / 80, 1, 1.8);
     const maintCost = type.maintPerHour * blockH * ageMult;
@@ -949,7 +1020,7 @@ function processRealTimeDay(state, fromMs, toMs, rng) {
     const routeCost = fuelCost + crewCost + maintCost + airportCost + handlingCost + distributionCost;
 
     const ancillary = v3AddAncillaryRevenue(state, routeRev);
-    const carbonCost = v3ApplyCarbonCost(state, fuelBurnLiters(dist, type) * flights);
+    const carbonCost = v3ApplyCarbonCost(state, fuelBurnLiters(dist, type) * flights, route.originId, route.destId);
 
     revenue += routeRev + ancillary;
     costs += routeCost + carbonCost;
@@ -982,19 +1053,18 @@ function processRealTimeDay(state, fromMs, toMs, rng) {
     if (route.history.length > 365) route.history.splice(0, route.history.length - 365);
     if (route.fareStrategy === 'YIELD_OPTIMIZED') adaptYield(route, loadFactor);
 
-    const assigned = state.fleet.filter(f => f.assignedRouteId === route.id && f.status === 'ACTIVE');
-    assigned.forEach(f => {
-      f.flightHours = (f.flightHours || 0) + blockH;
-      f.cycles = (f.cycles || 0) + flights;
-      f.condition = clamp(f.condition - blockH * 0.035, 10, 100);
-      if (f.condition < 55 && rng() < 0.02) {
-        f.status = 'MAINTENANCE';
-        f.maintUntil = toMs + 2 * DAY_MS;
-        const eventCost = type.maintPerHour * 25;
-        costs += eventCost;
-        breakdown.maint += eventCost;
-        accounting.maintenanceExpense = (accounting.maintenanceExpense || 0) + eventCost;
-        addLedger(state, state.meta.week, 'MAINT_UNSCHEDULED', -eventCost, 'Maintenance non programmée');
+    const assigned = state.fleet.filter(f => f.assignedRouteId === route.id && f.status === 'ACTIVE' && f.typeId === route.aircraftTypeId);
+    const blockPerFlight = blockTimeHours(dist, type.cruiseKmh);
+    assigned.forEach((f, index) => {
+      const baseFlights = Math.floor(flights / assigned.length);
+      const tailFlights = baseFlights + (index < (flights % assigned.length) ? 1 : 0);
+      if (!tailFlights) return;
+      const usage = applyAircraftUsage(state, f, type, tailFlights, blockPerFlight * tailFlights, toMs, rng);
+      if (usage.maintenanceCost > 0) {
+        costs += usage.maintenanceCost;
+        breakdown.maint += usage.maintenanceCost;
+        accounting.maintenanceExpense = (accounting.maintenanceExpense || 0) + usage.maintenanceCost;
+        addLedger(state, state.meta.week, usage.scheduled ? 'MAINT_SCHEDULED' : 'MAINT_UNSCHEDULED', -usage.maintenanceCost, usage.scheduled ? 'Visite de maintenance programmée' : 'Maintenance non programmée');
       }
     });
   });
