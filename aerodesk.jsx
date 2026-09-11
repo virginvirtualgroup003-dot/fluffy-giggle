@@ -1115,7 +1115,7 @@ function applyCapacityConstraints(result, products) {
   const capUsed = {};
   products.forEach(p => { capUsed[p.key] = 0; });
   const capacity = {};
-  products.forEach(p => { capacity[p.key] = p.seats * p.freq; });
+  products.forEach(p => { capacity[p.key] = passengerSellableCapacity(p.seats, p.freq); });
 
   const allEntries = [];
   SEGMENTS.forEach(seg => result.segments[seg].products.forEach(e => allEntries.push(e)));
@@ -1459,6 +1459,77 @@ function passengerDisruptionCost(state, route, plan, bookedPassengers) {
   };
 }
 
+// Passenger booking behavior is deliberately kept inside the simulation engine.
+// The UI exposes outcomes (loads, disruption and service quality), not the hidden tuning values.
+const PASSENGER_REALISM_MODEL = {
+  overbookingFraction: 0.05,
+  baseShowUpRate: 0.965,
+  showUpJitter: 0.02,
+  nonEuCompensationBaseUSD: 240,
+  nonEuDistanceRateUSD: 0.045,
+  careUSDPerDenied: 45,
+  reaccommodationBaseUSD: 85,
+};
+
+function passengerSellableCapacity(seats, flights = 1) {
+  const installedSeats = Math.max(0, Math.floor(seats || 0));
+  const sectors = Math.max(0, Math.floor(flights || 0));
+  const physicalCapacity = installedSeats * sectors;
+  if (!physicalCapacity) return 0;
+  return Math.max(physicalCapacity, Math.floor(physicalCapacity * (1 + PASSENGER_REALISM_MODEL.overbookingFraction)));
+}
+
+function settlePassengerBookings(seats, flights, bookedPassengers, rng = Math.random) {
+  const physicalCapacity = Math.max(0, Math.floor(seats || 0)) * Math.max(0, Math.floor(flights || 0));
+  const sellableCapacity = passengerSellableCapacity(seats, flights);
+  const booked = Math.min(sellableCapacity, Math.max(0, Math.round(bookedPassengers || 0)));
+  let sample = 0.5;
+  if (typeof rng === 'function') {
+    const candidate = Number(rng());
+    if (Number.isFinite(candidate)) sample = clamp(candidate, 0, 1);
+  }
+  const showUpRate = clamp(
+    PASSENGER_REALISM_MODEL.baseShowUpRate + (sample - 0.5) * 2 * PASSENGER_REALISM_MODEL.showUpJitter,
+    0.92,
+    0.995,
+  );
+  const showUps = Math.min(booked, Math.max(0, Math.round(booked * showUpRate)));
+  const noShows = Math.max(0, booked - showUps);
+  const boardedPassengers = Math.min(showUps, physicalCapacity);
+  const deniedBoarding = Math.max(0, showUps - boardedPassengers);
+  return {
+    physicalCapacity, sellableCapacity, bookedPassengers: booked, showUpRate,
+    showUps, noShows, boardedPassengers, deniedBoarding,
+  };
+}
+
+function deniedBoardingLiability(state, route, deniedPassengers) {
+  const denied = Math.max(0, Math.round(deniedPassengers || 0));
+  const empty = { deniedPassengers: denied, compensationUSD: 0, careUSD: 0, reaccommodationUSD: 0, totalUSD: 0 };
+  if (!denied || !route) return empty;
+
+  const distanceKm = distanceBetween(route.originId, route.destId);
+  let compensationUSD = 0;
+  let careUSD = 0;
+  let reaccommodationUSD = 0;
+  if (euPassengerRightsCovered(state, route)) {
+    const intraEU = EU_PASSENGER_RIGHTS_AIRPORTS.has(route.originId) && EU_PASSENGER_RIGHTS_AIRPORTS.has(route.destId);
+    const compensationEUR = distanceKm <= 1500 ? 250 : ((intraEU || distanceKm <= 3500) ? 400 : 600);
+    const fx = state.market?.fx?.EURUSD || 1.08;
+    compensationUSD = denied * compensationEUR * fx;
+    careUSD = denied * (25 + Math.min(75, distanceKm / 50)) * fx;
+    reaccommodationUSD = denied * (50 + Math.min(300, distanceKm * 0.04)) * fx;
+  } else {
+    compensationUSD = denied * (PASSENGER_REALISM_MODEL.nonEuCompensationBaseUSD + Math.min(500, distanceKm * PASSENGER_REALISM_MODEL.nonEuDistanceRateUSD));
+    careUSD = denied * PASSENGER_REALISM_MODEL.careUSDPerDenied;
+    reaccommodationUSD = denied * (PASSENGER_REALISM_MODEL.reaccommodationBaseUSD + Math.min(300, distanceKm * 0.03));
+  }
+  return {
+    deniedPassengers: denied, compensationUSD, careUSD, reaccommodationUSD,
+    totalUSD: compensationUSD + careUSD + reaccommodationUSD,
+  };
+}
+
 function v3EnsureFinance(state) {
   state.finance = state.finance || {};
   state.finance.accounting = state.finance.accounting || {};
@@ -1713,16 +1784,26 @@ function processRealTimeDay(state, fromMs, toMs, rng) {
     state.operations.cancelledFlights += plan.cancelledFlights;
     state.operations.delayedFlights += plan.delayedFlights;
     const flights = plan.operatedFlights;
-    const pax = routePax[route.id] || 0;
-    const bookedPax = routeBookedPax[route.id] || pax;
+    const operatedBookings = routePax[route.id] || 0;
+    const operationalSeats = payloadLimitedSeats(type, dist, route.originId, route.destId);
+    const passengerFlow = settlePassengerBookings(operationalSeats, flights, operatedBookings, rng);
+    const pax = passengerFlow.boardedPassengers;
+    const bookedPax = routeBookedPax[route.id] || operatedBookings;
     const routeRev = routeRevenueValue(routeRevenue, route.id);
     const disruption = passengerDisruptionCost(state, route, plan, bookedPax);
+    const deniedBoarding = deniedBoardingLiability(state, route, passengerFlow.deniedBoarding);
     const accounting = v3EnsureFinance(state);
     if (disruption.totalUSD > 0) {
       costs += disruption.totalUSD;
       breakdown.disruption += disruption.totalUSD;
       accounting.disruptionExpense = (accounting.disruptionExpense || 0) + disruption.totalUSD;
       addLedger(state, state.meta.week, 'PASSENGER_RIGHTS', -disruption.totalUSD, 'Indemnisation, assistance et réacheminement passagers');
+    }
+    if (deniedBoarding.totalUSD > 0) {
+      costs += deniedBoarding.totalUSD;
+      breakdown.disruption += deniedBoarding.totalUSD;
+      accounting.disruptionExpense = (accounting.disruptionExpense || 0) + deniedBoarding.totalUSD;
+      addLedger(state, state.meta.week, 'DENIED_BOARDING', -deniedBoarding.totalUSD, 'Refus d’embarquement, assistance et réacheminement');
     }
     if (!flights) {
       if (plan.scheduledFlights) {
@@ -1777,9 +1858,9 @@ function processRealTimeDay(state, fromMs, toMs, rng) {
       state.operations.activeFlightWindows.push({ routeId: route.id, departureAt, arrivalAt: departureAt + plan.blockHoursPerFlight * 3600000 });
     });
 
-    const loadFactor = flights ? pax / (type.seats * flights) : 0;
+    const loadFactor = passengerFlow.physicalCapacity ? pax / passengerFlow.physicalCapacity : 0;
     route.history = route.history || [];
-    route.history.push({ time: new Date(toMs).toISOString(), week: state.meta.week, pax: Math.round(pax), cargoKg: Math.round(cargo.carriedKg), cargoRevenue: cargo.revenueUSD, revenue: routeRev + ancillary + cargo.revenueUSD, cost: routeCost + carbonCost + disruption.totalUSD, loadFactor, scheduledFlights: plan.scheduledFlights, operatedFlights: flights, cancelledFlights: plan.cancelledFlights, delayedFlights: plan.delayedFlights });
+    route.history.push({ time: new Date(toMs).toISOString(), week: state.meta.week, pax: Math.round(pax), bookedPax: passengerFlow.bookedPassengers, noShows: passengerFlow.noShows, deniedBoarding: passengerFlow.deniedBoarding, cargoKg: Math.round(cargo.carriedKg), cargoRevenue: cargo.revenueUSD, revenue: routeRev + ancillary + cargo.revenueUSD, cost: routeCost + carbonCost + disruption.totalUSD + deniedBoarding.totalUSD, loadFactor, scheduledFlights: plan.scheduledFlights, operatedFlights: flights, cancelledFlights: plan.cancelledFlights, delayedFlights: plan.delayedFlights });
     if (route.history.length > 365) route.history.splice(0, route.history.length - 365);
     if (route.fareStrategy === 'YIELD_OPTIMIZED') adaptYield(route, loadFactor);
 
