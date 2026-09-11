@@ -58,6 +58,39 @@ const AIRPORTS = [
   { id: 'AKL', city: 'Auckland', country: 'Nouvelle-Zélande', lat: -37.01, lon: 174.79, size: 45, tourist: 70, vfr: 30, corp: 50, fee: 5500, infra: 75, curfew: true, region: 'OC' },
 ];
 
+const AIRPORT_OPERATIONAL_DATA = {
+  LHR: { timeZone: 'Europe/London', runwayM: 3902 },
+  CDG: { timeZone: 'Europe/Paris', runwayM: 4215 },
+  FRA: { timeZone: 'Europe/Berlin', runwayM: 4000, curfewWindow: { startMinute: 23 * 60, endMinute: 5 * 60 } },
+  AMS: { timeZone: 'Europe/Amsterdam', runwayM: 3800 },
+  MAD: { timeZone: 'Europe/Madrid', runwayM: 4348 },
+  FCO: { timeZone: 'Europe/Rome', runwayM: 3902 },
+  JFK: { timeZone: 'America/New_York', runwayM: 4423 },
+  LAX: { timeZone: 'America/Los_Angeles', runwayM: 3685 },
+  ORD: { timeZone: 'America/Chicago', runwayM: 3962 },
+  MIA: { timeZone: 'America/New_York', runwayM: 3962 },
+  YYZ: { timeZone: 'America/Toronto', runwayM: 3389 },
+  GRU: { timeZone: 'America/Sao_Paulo', runwayM: 3700 },
+  EZE: { timeZone: 'America/Argentina/Buenos_Aires', runwayM: 3300 },
+  DXB: { timeZone: 'Asia/Dubai', runwayM: 4447 },
+  DEL: { timeZone: 'Asia/Kolkata', runwayM: 4430 },
+  SIN: { timeZone: 'Asia/Singapore', runwayM: 4000 },
+  HKG: { timeZone: 'Asia/Hong_Kong', runwayM: 3800 },
+  NRT: { timeZone: 'Asia/Tokyo', runwayM: 4000, curfewWindow: { startMinute: 0, endMinute: 6 * 60 } },
+  ICN: { timeZone: 'Asia/Seoul', runwayM: 3750 },
+  SYD: { timeZone: 'Australia/Sydney', runwayM: 3962, curfewWindow: { startMinute: 23 * 60, endMinute: 6 * 60 } },
+  JNB: { timeZone: 'Africa/Johannesburg', runwayM: 4421 },
+  CAI: { timeZone: 'Africa/Cairo', runwayM: 4000 },
+  LOS: { timeZone: 'Africa/Lagos', runwayM: 3900 },
+  AKL: { timeZone: 'Pacific/Auckland', runwayM: 3635 },
+};
+
+AIRPORTS.forEach(a => {
+  const ops = AIRPORT_OPERATIONAL_DATA[a.id] || { timeZone: 'UTC', runwayM: 3000 };
+  Object.assign(a, ops);
+  a.curfew = Boolean(ops.curfewWindow);
+});
+
 const AIRCRAFT_TYPES = [
   // Real aircraft families. Performance figures are rounded from manufacturer data;
   // acquisition/lease figures remain modeled because transaction prices are confidential.
@@ -122,6 +155,18 @@ function fuelBurnLiters(distanceKm, type) {
   return type.fixedBurn + type.cruiseBurn * cruiseHours;
 }
 
+function buildFuelPlan(distanceKm, type) {
+  const tripLiters = fuelBurnLiters(distanceKm, type);
+  const taxiLiters = Math.max(50, type.cruiseBurn * 0.12);
+  const contingencyLiters = tripLiters * 0.05;
+  const alternateLiters = type.cruiseBurn * 0.25;
+  const finalReserveLiters = type.cruiseBurn * 0.5;
+  const dispatchLiters = tripLiters + taxiLiters + contingencyLiters + alternateLiters + finalReserveLiters;
+  // Reserve and alternate fuel are protected planning quantities, not assumed consumed on every flight.
+  const expectedBurnLiters = tripLiters + taxiLiters + contingencyLiters * 0.25;
+  return { tripLiters, taxiLiters, contingencyLiters, alternateLiters, finalReserveLiters, dispatchLiters, expectedBurnLiters };
+}
+
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
 function seededRandom(seed) {
@@ -162,8 +207,9 @@ function groundAltBonus(distanceKm, seg) {
   return strength * Math.max(0, (1800 - distanceKm) / 1800) * 1.1;
 }
 
-function seasonalFactor(seg, weekOfYear) {
-  const phase = (weekOfYear / 52) * 2 * Math.PI;
+function seasonalFactor(seg, weekOfYear, latitude = 45) {
+  const shiftedWeek = latitude < 0 ? ((weekOfYear + 25) % 52) + 1 : weekOfYear;
+  const phase = (shiftedWeek / 52) * 2 * Math.PI;
   if (seg === 'LEISURE') return 1 + 0.28 * Math.sin(phase - Math.PI / 2.3);
   if (seg === 'VFR') return 1 + 0.22 * Math.sin(phase - Math.PI / 1.6);
   return 1 + 0.08 * Math.sin(phase);
@@ -173,7 +219,7 @@ function marketSizeIndex(o, d) { return Math.sqrt(o.size * d.size); }
 
 function segmentBasePotential(o, d, distanceKm, seg, weekOfYear, macro) {
   const size = marketSizeIndex(o, d);
-  const seasonal = seasonalFactor(seg, weekOfYear);
+  const seasonal = seasonalFactor(seg, weekOfYear, (o.lat + d.lat) / 2);
   let val;
   if (seg === 'BUSINESS') {
     val = SEG_POTENTIAL_K.BUSINESS * size * Math.sqrt(o.corp * d.corp) / Math.pow(1 + distanceKm / 4000, 1.05);
@@ -199,22 +245,223 @@ function getISOWeek(date) {
   return Math.ceil((((d - yearStart) / DAY_MS) + 1) / 7);
 }
 
-function scheduledDeparturesBetween(route, fromMs, toMs) {
-  let count = 0;
-  const start = new Date(fromMs);
-  start.setHours(0, 0, 0, 0);
-  const end = new Date(toMs);
-  end.setHours(0, 0, 0, 0);
-  for (let d = new Date(start); d <= end; d = new Date(d.getTime() + DAY_MS)) {
-    const dow = d.getDay();
+function zonedParts(timestampMs, timeZone) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: timeZone || 'UTC', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+  }).formatToParts(new Date(timestampMs));
+  const values = {};
+  parts.forEach(part => { if (part.type !== 'literal') values[part.type] = Number(part.value); });
+  return values;
+}
+
+function zonedLocalToUtcMs(year, month, day, hour, minute, timeZone) {
+  const desired = Date.UTC(year, month - 1, day, hour, minute, 0, 0);
+  let guess = desired;
+  for (let i = 0; i < 4; i += 1) {
+    const actualParts = zonedParts(guess, timeZone);
+    const actual = Date.UTC(actualParts.year, actualParts.month - 1, actualParts.day, actualParts.hour, actualParts.minute, 0, 0);
+    const delta = desired - actual;
+    guess += delta;
+    if (Math.abs(delta) < 60_000) break;
+  }
+  return guess;
+}
+
+function minuteFallsInWindow(minute, window) {
+  if (!window) return false;
+  if (window.startMinute < window.endMinute) return minute >= window.startMinute && minute < window.endMinute;
+  return minute >= window.startMinute || minute < window.endMinute;
+}
+
+function movementBlockedByCurfew(airportId, timestampMs) {
+  const ap = airport(airportId);
+  if (!ap?.curfewWindow) return false;
+  const local = zonedParts(timestampMs, ap.timeZone);
+  return minuteFallsInWindow(local.hour * 60 + local.minute, ap.curfewWindow);
+}
+
+function scheduledDepartureTimesBetween(route, fromMs, toMs) {
+  const origin = airport(route.originId);
+  const timeZone = origin?.timeZone || 'UTC';
+  const fromLocal = zonedParts(fromMs, timeZone);
+  const toLocal = zonedParts(toMs, timeZone);
+  const startDay = Date.UTC(fromLocal.year, fromLocal.month - 1, fromLocal.day) - DAY_MS;
+  const endDay = Date.UTC(toLocal.year, toLocal.month - 1, toLocal.day) + DAY_MS;
+  const departures = [];
+
+  for (let daySerial = startDay; daySerial <= endDay; daySerial += DAY_MS) {
+    const localDate = new Date(daySerial);
+    const dow = localDate.getUTCDay();
     (route.schedule || []).forEach(slot => {
       if (slot.dayOfWeek !== dow) return;
-      const departure = new Date(d);
-      departure.setHours(Math.floor(slot.minute / 60), slot.minute % 60, 0, 0);
-      if (departure.getTime() > fromMs && departure.getTime() <= toMs) count += 1;
+      const departure = zonedLocalToUtcMs(
+        localDate.getUTCFullYear(), localDate.getUTCMonth() + 1, localDate.getUTCDate(),
+        Math.floor(slot.minute / 60), slot.minute % 60, timeZone,
+      );
+      if (departure > fromMs && departure <= toMs) departures.push(departure);
     });
   }
-  return count;
+  return departures.sort((a, b) => a - b);
+}
+
+function scheduledDeparturesBetween(route, fromMs, toMs) {
+  return scheduledDepartureTimesBetween(route, fromMs, toMs).length;
+}
+
+
+const AIRPORT_MCT_MINUTES = {
+  LHR: 75, CDG: 60, FRA: 60, AMS: 50, MAD: 60, FCO: 60,
+  JFK: 75, LAX: 60, ORD: 55, MIA: 60, YYZ: 60,
+  GRU: 60, EZE: 60, DXB: 75, DEL: 60, SIN: 60, HKG: 60,
+  NRT: 60, ICN: 60, SYD: 60, JNB: 60, CAI: 60, LOS: 60, AKL: 45,
+};
+
+function minimumConnectionTimeHours(airportId) {
+  return (AIRPORT_MCT_MINUTES[airportId] || 60) / 60;
+}
+
+function startOfIsoWeekUtc(referenceMs) {
+  const date = new Date(referenceMs);
+  const day = date.getUTCDay() || 7;
+  return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() - day + 1, 0, 0, 0, 0);
+}
+
+function connectionScheduleMetrics(firstRoute, secondRoute, referenceMs = Date.now()) {
+  if (!firstRoute || !secondRoute || firstRoute.destId !== secondRoute.originId) {
+    return { feasibleFrequency: 0, averageWaitHours: Infinity, mctHours: 1 };
+  }
+  const hubId = firstRoute.destId;
+  const mctHours = minimumConnectionTimeHours(hubId);
+  const firstType = aircraftType(firstRoute.aircraftTypeId);
+  const firstBlockH = blockTimeHours(distanceBetween(firstRoute.originId, firstRoute.destId), firstType.cruiseKmh);
+  const weekStart = startOfIsoWeekUtc(referenceMs);
+  const horizonEnd = weekStart + 8 * DAY_MS;
+  const firstDepartures = scheduledDepartureTimesBetween(firstRoute, weekStart - DAY_MS, weekStart + 7 * DAY_MS);
+  const secondDepartures = scheduledDepartureTimesBetween(secondRoute, weekStart - DAY_MS, horizonEnd);
+  const waits = [];
+
+  firstDepartures.forEach(firstDeparture => {
+    const arrival = firstDeparture + firstBlockH * 3600000;
+    const earliestConnection = arrival + mctHours * 3600000;
+    const latestUsefulConnection = arrival + 8 * 3600000;
+    const secondDeparture = secondDepartures.find(dep => dep >= earliestConnection && dep <= latestUsefulConnection);
+    if (secondDeparture) waits.push((secondDeparture - arrival) / 3600000);
+  });
+
+  const feasibleFrequency = Math.min(waits.length, firstRoute.frequencyPerWeek || waits.length, secondRoute.frequencyPerWeek || waits.length);
+  const selectedWaits = waits.slice(0, feasibleFrequency);
+  return {
+    feasibleFrequency,
+    averageWaitHours: selectedWaits.length ? selectedWaits.reduce((sum, wait) => sum + wait, 0) / selectedWaits.length : Infinity,
+    mctHours,
+  };
+}
+
+function airportCongestionFactor(airportId, timestampMs) {
+  const ap = airport(airportId);
+  if (!ap) return 0.5;
+  const local = zonedParts(timestampMs, ap.timeZone || 'UTC');
+  const minute = local.hour * 60 + local.minute;
+  const sizeBase = clamp((ap.size || 50) / 100, 0.25, 1.0);
+  let wave = 0.65;
+  if ((minute >= 6 * 60 && minute < 10 * 60) || (minute >= 16 * 60 && minute < 20 * 60 + 30)) wave = 1.25;
+  else if (minute >= 10 * 60 && minute < 16 * 60) wave = 0.82;
+  else if (minute >= 20 * 60 + 30 && minute < 23 * 60) wave = 0.92;
+  else wave = 0.45;
+  return clamp(sizeBase * wave, 0.12, 1.35);
+}
+
+function validateRoutePlan({ originId, destId, aircraftTypeId, departMinute }) {
+  const issues = [];
+  const origin = airport(originId);
+  const destination = airport(destId);
+  const type = aircraftType(aircraftTypeId);
+  if (!origin || !destination || !type) return [{ code: 'REFERENCE', message: 'Référence aéroport ou appareil inconnue.' }];
+  if (originId === destId) issues.push({ code: 'SAME_AIRPORT', message: 'Origine et destination doivent être différentes.' });
+
+  const distanceKm = distanceBetween(originId, destId);
+  if (distanceKm > type.rangeKm) {
+    issues.push({ code: 'RANGE', message: `${type.name} ne dispose pas de l’autonomie publiée nécessaire pour ${Math.round(distanceKm)} km.` });
+  }
+  const limitingRunway = Math.min(origin.runwayM || Infinity, destination.runwayM || Infinity);
+  if (type.runway && limitingRunway < type.runway) {
+    issues.push({ code: 'RUNWAY', message: `La piste disponible est inférieure au besoin de référence de ${type.runway} m pour ${type.name}.` });
+  }
+  if (minuteFallsInWindow(departMinute, origin.curfewWindow)) {
+    issues.push({ code: 'CURFEW_ORIGIN', message: `${originId} interdit les mouvements planifiés sur ce créneau local.` });
+  }
+
+  if (!issues.some(issue => issue.code === 'RANGE')) {
+    const nowLocal = zonedParts(Date.now(), origin.timeZone);
+    const departureUtc = zonedLocalToUtcMs(
+      nowLocal.year, nowLocal.month, nowLocal.day,
+      Math.floor(departMinute / 60), departMinute % 60, origin.timeZone,
+    );
+    const arrivalUtc = departureUtc + blockTimeHours(distanceKm, type.cruiseKmh) * 3600000;
+    if (movementBlockedByCurfew(destId, arrivalUtc)) {
+      issues.push({ code: 'CURFEW_DEST', message: `L’arrivée estimée tombe dans la période de couvre-feu de ${destId}.` });
+    }
+  }
+  return issues;
+}
+
+const MAX_AIRCRAFT_SERVICE_HOURS_PER_DAY = 18;
+
+function buildOperationalPlan(state, route, fromMs, toMs, rng = Math.random) {
+  const type = aircraftType(route.aircraftTypeId);
+  const distanceKm = distanceBetween(route.originId, route.destId);
+  const blockH = blockTimeHours(distanceKm, type.cruiseKmh);
+  const scheduledTimes = scheduledDepartureTimesBetween(route, fromMs, toMs);
+  const legalTimes = scheduledTimes.filter(departureAt => {
+    const arrivalAt = departureAt + blockH * 3600000;
+    return !movementBlockedByCurfew(route.originId, departureAt) && !movementBlockedByCurfew(route.destId, arrivalAt);
+  });
+  const curfewCancellations = scheduledTimes.length - legalTimes.length;
+  const assigned = state.fleet.filter(f =>
+    f.assignedRouteId === route.id && f.status === 'ACTIVE' && f.typeId === route.aircraftTypeId
+  );
+  const elapsedDays = Math.max(0, (toMs - fromMs) / DAY_MS);
+  const serviceHoursPerFlight = blockH + (type.turnaround || 30) / 60;
+  const capacityHours = assigned.length * MAX_AIRCRAFT_SERVICE_HOURS_PER_DAY * elapsedDays;
+  const utilizationCapacity = serviceHoursPerFlight > 0 ? Math.floor(capacityHours / serviceHoursPerFlight + 1e-9) : 0;
+  const candidateTimes = legalTimes.slice(0, utilizationCapacity);
+  const utilizationCancellations = Math.max(0, legalTimes.length - candidateTimes.length);
+  const avgCondition = assigned.length ? assigned.reduce((sum, f) => sum + f.condition, 0) / assigned.length : 0;
+
+  const operatedDepartureTimes = [];
+  let technicalCancellations = 0;
+  let delayedFlights = 0;
+  candidateTimes.forEach(departureAt => {
+    const arrivalAt = departureAt + blockH * 3600000;
+    const congestion = (
+      airportCongestionFactor(route.originId, departureAt) +
+      airportCongestionFactor(route.destId, arrivalAt)
+    ) / 2;
+    const cancellationRisk = clamp(0.0015 + Math.max(0, 75 - avgCondition) * 0.0008 + congestion * 0.0045, 0.0015, 0.08);
+    const delayRisk = clamp(0.025 + congestion * 0.13 + Math.max(0, 85 - avgCondition) * 0.002, 0.03, 0.40);
+    if (rng() < cancellationRisk) {
+      technicalCancellations += 1;
+      return;
+    }
+    operatedDepartureTimes.push(departureAt);
+    if (rng() < delayRisk) delayedFlights += 1;
+  });
+
+  const cancelledFlights = curfewCancellations + utilizationCancellations + technicalCancellations;
+  return {
+    scheduledFlights: scheduledTimes.length,
+    operatedFlights: operatedDepartureTimes.length,
+    cancelledFlights,
+    delayedFlights,
+    curfewCancellations,
+    utilizationCancellations,
+    technicalCancellations,
+    operatedDepartureTimes,
+    blockHoursPerFlight: blockH,
+    serviceHoursPerFlight,
+    utilizationCapacity,
+  };
 }
 
 function prorateWeekly(value, elapsedMs) {
@@ -238,7 +485,7 @@ function newGame(companyName, homeBaseId, rngSeed) {
     version: 3,
     meta: { week: 1, year: new Date().getUTCFullYear(), weekOfYear: getISOWeek(new Date()), createdAt: Date.now(), lastProcessedAt: Date.now(), currentTime: new Date().toISOString(), rngSeed: rngSeed || Date.now() % 100000, realTime: true },
     company: {
-      name: companyName, homeBase: homeBaseId, cash: 45e6, reputation: 50, otp: 88,
+      name: companyName, homeBase: homeBaseId, cash: 45e6, currency: 'USD', reputation: 50, otp: 88,
       founded: true, bankrupt: false, nextAircraftSerial: 1, nextRouteSerial: 1,
     },
     fleet: [],
@@ -246,6 +493,7 @@ function newGame(companyName, homeBaseId, rngSeed) {
     orders: [], // pending aircraft deliveries
     finance: {
       loans: [],
+      leaseDeposits: 0,
       cashHistory: [{ week: 0, cash: 45e6 }],
       plHistory: [],
       ledgerRecent: [],
@@ -254,10 +502,13 @@ function newGame(companyName, homeBaseId, rngSeed) {
         ancillaryRevenue: 0,
         fuelExpense: 0,
         laborExpense: 0,
+        crewExpense: 0,
         maintenanceExpense: 0,
         airportExpense: 0,
         handlingExpense: 0,
         distributionExpense: 0,
+        disruptionExpense: 0,
+        depreciationExpense: 0,
         leasingExpense: 0,
         insuranceExpense: 0,
         overheadExpense: 0,
@@ -268,6 +519,7 @@ function newGame(companyName, homeBaseId, rngSeed) {
     market: {
       competitors,
       fuelPrice: 0.82,
+      fx: { EURUSD: 1.08 },
       macro: { demandIndex: 1.0, fuelTrend: 0, cycle: 'NORMAL' },
       events: [],
     },
@@ -328,19 +580,29 @@ function scheduleFitScore(seg, departSlots) {
   return best;
 }
 
+function routeHasActiveAircraft(state, route) {
+  return state.fleet.some(f => f.assignedRouteId === route.id && f.status === 'ACTIVE');
+}
+
 function buildPlayerProducts(state, originId, destId) {
   const products = [];
-  const direct = state.routes.find(r => r.status === 'ACTIVE' && r.originId === originId && r.destId === destId);
-  if (direct) {
-    products.push(makeProductFromRoute(direct, 'PLAYER', state.company, [direct]));
-  }
-  // one-stop via player's own hub(s): any active route origin->hub and hub->dest
-  const legsOut = state.routes.filter(r => r.status === 'ACTIVE' && r.originId === originId && r.destId !== destId);
+  const directRoutes = state.routes.filter(r =>
+    r.status === 'ACTIVE' && r.originId === originId && r.destId === destId && routeHasActiveAircraft(state, r)
+  );
+  directRoutes.forEach(route => products.push(makeProductFromRoute(route, 'PLAYER', state.company, [route])));
+
+  // One-stop products are offered only when both operating legs have serviceable aircraft.
+  const legsOut = state.routes.filter(r =>
+    r.status === 'ACTIVE' && r.originId === originId && r.destId !== destId && routeHasActiveAircraft(state, r)
+  );
   legsOut.forEach(leg1 => {
-    const leg2 = state.routes.find(r => r.status === 'ACTIVE' && r.originId === leg1.destId && r.destId === destId);
-    if (leg2 && leg1.destId !== originId) {
-      products.push(makeConnectProduct([leg1, leg2], 'PLAYER', state.company));
-    }
+    state.routes
+      .filter(r => r.status === 'ACTIVE' && r.originId === leg1.destId && r.destId === destId && routeHasActiveAircraft(state, r))
+      .forEach(leg2 => {
+        if (leg1.destId === originId) return;
+        const metrics = connectionScheduleMetrics(leg1, leg2, state.meta?.lastProcessedAt || Date.now());
+        if (metrics.feasibleFrequency > 0) products.push(makeConnectProduct([leg1, leg2], 'PLAYER', state.company, metrics));
+      });
   });
   return products;
 }
@@ -367,23 +629,25 @@ function makeProductFromRoute(route, owner, company, legs) {
   };
 }
 
-function makeConnectProduct(legs, owner, company) {
+function makeConnectProduct(legs, owner, company, metrics = null) {
   const [l1, l2] = legs;
   const t1 = aircraftType(l1.aircraftTypeId), t2 = aircraftType(l2.aircraftTypeId);
   const d1 = distanceBetween(l1.originId, l1.destId), d2 = distanceBetween(l2.originId, l2.destId);
   const bt1 = blockTimeHours(d1, t1.cruiseKmh), bt2 = blockTimeHours(d2, t2.cruiseKmh);
-  const mct = 0.75; // 45 min minimum connection assumption
-  const connectSlack = 1.3; // average extra wait hours modeled
+  const connection = metrics || connectionScheduleMetrics(l1, l2);
+  if (!connection.feasibleFrequency) return null;
   return {
     key: 'P-' + l1.id + '-' + l2.id, owner, ownerRef: company, legs: 2,
     distanceKm: d1 + d2,
-    freq: Math.min(l1.frequencyPerWeek, l2.frequencyPerWeek),
+    freq: connection.feasibleFrequency,
     fareStrategy: l1.fareStrategy,
     departSlots: l1.schedule.map(s => s.minute),
-    totalTripHours: bt1 + bt2 + mct + connectSlack,
+    totalTripHours: bt1 + bt2 + connection.averageWaitHours,
     reputation: company.reputation, otp: company.otp - 6,
     seats: Math.min(t1.seats, t2.seats), route: l1, secondRoute: l2,
-    mctGap: connectSlack,
+    mctGap: connection.averageWaitHours,
+    mctHours: connection.mctHours,
+    connectionWaitHours: connection.averageWaitHours,
   };
 }
 
@@ -406,7 +670,10 @@ function makeProductFromCompetitorRoute(route, competitor) {
 
 function productFareForSegment(product, seg) {
   const strat = FARE_STRATEGIES[product.fareStrategy] || FARE_STRATEGIES.COMPETITIVE;
-  const ref = fareReference(product.distanceKm) * strat.refMult;
+  const routeMultiplier = product.fareStrategy === 'YIELD_OPTIMIZED'
+    ? (product.route?._yieldMult || strat.refMult)
+    : strat.refMult;
+  const ref = fareReference(product.distanceKm) * routeMultiplier;
   const p = SEG_PARAMS[seg];
   return ref * p.fareMult;
 }
@@ -415,8 +682,11 @@ function productUtility(product, seg, marketState) {
   const p = SEG_PARAMS[seg];
   const strat = FARE_STRATEGIES[product.fareStrategy] || FARE_STRATEGIES.COMPETITIVE;
   const fare = productFareForSegment(product, seg);
-  const availShare = strat.alloc.flex + strat.alloc.prem;
-  const valueShare = strat.alloc.deep + strat.alloc.disc;
+  const alloc = product.fareStrategy === 'YIELD_OPTIMIZED' && product.route?._yieldAlloc
+    ? product.route._yieldAlloc
+    : strat.alloc;
+  const availShare = alloc.flex + alloc.prem;
+  const valueShare = alloc.deep + alloc.disc;
   const sched = scheduleFitScore(seg, product.departSlots);
   const priorShare = marketState.priorShare[product.owner] || 0;
   let u = -p.priceBeta * fare
@@ -426,6 +696,7 @@ function productUtility(product, seg, marketState) {
     + p.schedW * sched
     - p.durW * product.totalTripHours
     - p.stopPen * (product.legs - 1)
+    - p.mctPen * Math.max(0, (product.mctGap || 0) - 0.75)
     + p.reputW * (product.reputation - 50) / 50
     + p.otpW * (product.otp - 80) / 20
     + p.loyaltyW * priorShare;
@@ -440,7 +711,7 @@ function computeMarketOutcome(state, originId, destId, weekOfYear) {
   const products = [...playerProducts, ...compProducts];
   if (products.length === 0) return null;
 
-  const marketKey = originId + '-' + destId;
+  const marketKey = originId + '|' + destId;
   const priorShare = state._priorShareCache && state._priorShareCache[marketKey] || {};
   const marketState = { priorShare };
 
@@ -532,14 +803,127 @@ function addLedger(state, week, category, amount, note) {
 
 const AERODESK_V3 = {
   ancillaryRate: 0.14,
-  laborDailyBaseEUR: 1800,
-  laborPerAircraftDailyEUR: 520,
-  laborPerRouteDailyEUR: 180,
+  laborDailyBaseUSD: 1800,
+  laborPerAircraftDailyUSD: 520,
+  laborPerRouteDailyUSD: 180,
   insuranceAnnualRate: 0.008,
   carbonEURPerTonneCO2: 90,
-  co2KgPerLiterJetA: 3.16,
+  co2KgPerLiterJetA: 2.52,
   airportInflationAnnual: 0.025,
 };
+
+
+const EUROPEAN_CARBON_MARKET_AIRPORTS = new Set(['LHR', 'CDG', 'FRA', 'AMS', 'MAD', 'FCO']);
+const SCHEDULED_CHECK_INTERVAL_HOURS = 650;
+const SCHEDULED_CHECK_INTERVAL_CYCLES = 400;
+const SCHEDULED_CHECK_DURATION_HOURS = 18;
+
+function minimumOperatingCrew(type) {
+  const flightDeck = 2;
+  const cabin = Math.max(1, Math.ceil(type.seats / 50));
+  return { flightDeck, cabin, total: flightDeck + cabin };
+}
+
+function crewCostForOperations(type, totalBlockHours, flights) {
+  if (!flights || totalBlockHours <= 0) return 0;
+  const blockPerFlight = totalBlockHours / flights;
+  const dutyHours = blockPerFlight + 1.5; // report, taxi/turn and post-flight duty proxy
+  let augmentation = 1.0;
+  if (dutyHours > 17) augmentation = 1.8;
+  else if (dutyHours > 15) augmentation = 1.5;
+  else if (dutyHours > 13) augmentation = 1.2;
+
+  const regulatoryCrew = minimumOperatingCrew(type).total;
+  const rosteredCrew = Math.max(type.crew, regulatoryCrew);
+  // Long sectors require augmented/rest-capable crewing and generate layover/per-diem expense.
+  const hourly = rosteredCrew * 95 * totalBlockHours * augmentation;
+  const perDiem = blockPerFlight >= 6 ? rosteredCrew * 75 * flights : 0;
+  const layover = blockPerFlight >= 10 ? rosteredCrew * 140 * flights : 0;
+  return hourly + perDiem + layover;
+}
+
+function applyAircraftUsage(state, aircraft, type, flownCycles, flownBlockHours, nowMs, rng = Math.random) {
+  const previousHours = aircraft.flightHours || 0;
+  const previousCycles = aircraft.cycles || 0;
+  if (!aircraft.nextScheduledCheckHours) {
+    aircraft.nextScheduledCheckHours = (Math.floor(previousHours / SCHEDULED_CHECK_INTERVAL_HOURS) + 1) * SCHEDULED_CHECK_INTERVAL_HOURS;
+  }
+  if (!aircraft.nextScheduledCheckCycles) {
+    aircraft.nextScheduledCheckCycles = (Math.floor(previousCycles / SCHEDULED_CHECK_INTERVAL_CYCLES) + 1) * SCHEDULED_CHECK_INTERVAL_CYCLES;
+  }
+
+  aircraft.flightHours = previousHours + flownBlockHours;
+  aircraft.cycles = previousCycles + flownCycles;
+  aircraft.condition = clamp(aircraft.condition - flownBlockHours * 0.035 - flownCycles * 0.025, 10, 100);
+
+  const scheduledDue =
+    aircraft.flightHours >= aircraft.nextScheduledCheckHours ||
+    aircraft.cycles >= aircraft.nextScheduledCheckCycles;
+  let maintenanceCost = 0;
+  let scheduled = false;
+
+  if (scheduledDue) {
+    scheduled = true;
+    aircraft.status = 'MAINTENANCE';
+    aircraft.maintUntil = nowMs + SCHEDULED_CHECK_DURATION_HOURS * 3600000;
+    maintenanceCost = type.maintPerHour * SCHEDULED_CHECK_DURATION_HOURS;
+    while (aircraft.nextScheduledCheckHours <= aircraft.flightHours) aircraft.nextScheduledCheckHours += SCHEDULED_CHECK_INTERVAL_HOURS;
+    while (aircraft.nextScheduledCheckCycles <= aircraft.cycles) aircraft.nextScheduledCheckCycles += SCHEDULED_CHECK_INTERVAL_CYCLES;
+    state.log.push({ week: state.meta.week, type: 'MAINT', text: `${aircraft.id} entre en visite programmée après seuil heures/cycles.` });
+  } else if (aircraft.condition < 65 && flownCycles > 0) {
+    const perCycleRisk = 0.001 + Math.max(0, 65 - aircraft.condition) * 0.00035;
+    const unscheduledRisk = 1 - Math.pow(1 - perCycleRisk, flownCycles);
+    if (rng() < unscheduledRisk) {
+      aircraft.status = 'MAINTENANCE';
+      aircraft.maintUntil = nowMs + 2 * DAY_MS;
+      maintenanceCost = type.maintPerHour * 25;
+      state.log.push({ week: state.meta.week, type: 'MAINT', text: `${aircraft.id} est immobilisé pour maintenance non programmée.` });
+    }
+  }
+
+  return { maintenanceCost, scheduled };
+}
+
+
+const EU_PASSENGER_RIGHTS_AIRPORTS = new Set(['CDG', 'FRA', 'AMS', 'MAD', 'FCO']);
+
+function euPassengerRightsCovered(state, route) {
+  const originEU = EU_PASSENGER_RIGHTS_AIRPORTS.has(route.originId);
+  const destinationEU = EU_PASSENGER_RIGHTS_AIRPORTS.has(route.destId);
+  const carrierEU = EU_PASSENGER_RIGHTS_AIRPORTS.has(state.company.homeBase);
+  return originEU || (destinationEU && carrierEU);
+}
+
+function passengerDisruptionCost(state, route, plan, bookedPassengers) {
+  const empty = { affectedPassengers: 0, eligiblePassengers: 0, compensationUSD: 0, careUSD: 0, reaccommodationUSD: 0, totalUSD: 0 };
+  if (!plan?.scheduledFlights || !plan.cancelledFlights || bookedPassengers <= 0 || !euPassengerRightsCovered(state, route)) return empty;
+
+  const cancelledShare = clamp(plan.cancelledFlights / plan.scheduledFlights, 0, 1);
+  const affectedPassengers = bookedPassengers * cancelledShare;
+  const controllableCancelled = Math.min(
+    plan.cancelledFlights,
+    (plan.technicalCancellations || 0) + (plan.utilizationCancellations || 0) + (plan.curfewCancellations || 0),
+  );
+  const eligiblePassengers = bookedPassengers * clamp(controllableCancelled / plan.scheduledFlights, 0, 1);
+  const distanceKm = distanceBetween(route.originId, route.destId);
+  const intraEU = EU_PASSENGER_RIGHTS_AIRPORTS.has(route.originId) && EU_PASSENGER_RIGHTS_AIRPORTS.has(route.destId);
+  const compensationEUR = distanceKm <= 1500 ? 250 : ((intraEU || distanceKm <= 3500) ? 400 : 600);
+  const fx = state.market?.fx?.EURUSD || 1.08;
+
+  const compensationUSD = eligiblePassengers * compensationEUR * fx;
+  const careEURPerPassenger = 20 + Math.min(80, distanceKm / 40);
+  const careUSD = affectedPassengers * careEURPerPassenger * fx;
+  const reaccommodationEUR = affectedPassengers * (45 + Math.min(350, distanceKm * 0.05));
+  const reaccommodationUSD = reaccommodationEUR * fx;
+  return {
+    affectedPassengers,
+    eligiblePassengers,
+    compensationUSD,
+    careUSD,
+    reaccommodationUSD,
+    totalUSD: compensationUSD + careUSD + reaccommodationUSD,
+  };
+}
 
 function v3EnsureFinance(state) {
   state.finance = state.finance || {};
@@ -559,39 +943,38 @@ function v3ProcessRecurringCosts(state, elapsedMs) {
 
   // Labor is modeled as a continuous operating expense rather than a weekly click.
   const labor =
-    (AERODESK_V3.laborDailyBaseEUR +
-      aircraftCount * AERODESK_V3.laborPerAircraftDailyEUR +
-      activeRoutes * AERODESK_V3.laborPerRouteDailyEUR) * days;
+    (AERODESK_V3.laborDailyBaseUSD +
+      aircraftCount * AERODESK_V3.laborPerAircraftDailyUSD +
+      activeRoutes * AERODESK_V3.laborPerRouteDailyUSD) * days;
 
   // Insurance is tied to the current fleet replacement value.
   const insuredValue = fleetValue(state);
   const insurance =
     insuredValue * AERODESK_V3.insuranceAnnualRate * days / 365;
 
-  state.company.cash -= labor + insurance;
-
   v3BookAccounting(state, 'laborExpense', labor);
   v3BookAccounting(state, 'insuranceExpense', insurance);
 
-  addLedger(state, state.meta.week, 'LABOR', -labor, 'Personnel et charges opérationnelles');
-  addLedger(state, state.meta.week, 'INSURANCE', -insurance, 'Assurance flotte');
-
-  return state;
+  return { labor, insurance };
 }
 
 function v3AddAncillaryRevenue(state, passengerRevenue) {
   const ancillary = passengerRevenue * AERODESK_V3.ancillaryRate;
-  state.company.cash += ancillary;
   v3BookAccounting(state, 'ancillaryRevenue', ancillary);
   return ancillary;
 }
 
-function v3ApplyCarbonCost(state, fuelLiters) {
+function v3ApplyCarbonCost(state, fuelLiters, originId = null, destId = null) {
+  // Model direct allowance cost only for flights inside the covered European carbon market.
+  // Extra-European emissions remain tracked physically but are not charged a fictional flat ETS fee.
+  const covered = EUROPEAN_CARBON_MARKET_AIRPORTS.has(originId) && EUROPEAN_CARBON_MARKET_AIRPORTS.has(destId);
+  if (!covered) return 0;
   const tonnesCO2 = fuelLiters * AERODESK_V3.co2KgPerLiterJetA / 1000;
-  const cost = tonnesCO2 * AERODESK_V3.carbonEURPerTonneCO2;
-  state.company.cash -= cost;
-  v3BookAccounting(state, 'taxesExpense', cost);
-  return cost;
+  const eurCost = tonnesCO2 * AERODESK_V3.carbonEURPerTonneCO2;
+  const eurUsd = state.market?.fx?.EURUSD || 1.08;
+  const costUSD = eurCost * eurUsd;
+  v3BookAccounting(state, 'taxesExpense', costUSD);
+  return costUSD;
 }
 
 function v3GetPnl(state) {
@@ -603,10 +986,13 @@ function v3GetPnl(state) {
   const expenses =
     (a.fuelExpense || 0) +
     (a.laborExpense || 0) +
+    (a.crewExpense || 0) +
     (a.maintenanceExpense || 0) +
     (a.airportExpense || 0) +
     (a.handlingExpense || 0) +
     (a.distributionExpense || 0) +
+    (a.disruptionExpense || 0) +
+    (a.depreciationExpense || 0) +
     (a.leasingExpense || 0) +
     (a.insuranceExpense || 0) +
     (a.overheadExpense || 0) +
@@ -628,6 +1014,7 @@ function v3RefreshOperationalCounters(state) {
   state.operations.cancelledFlights = state.operations.cancelledFlights || 0;
   state.operations.delayedFlights = state.operations.delayedFlights || 0;
   state.operations.totalPassengers = state.operations.totalPassengers || 0;
+  state.operations.activeFlightWindows = state.operations.activeFlightWindows || [];
   return state;
 }
 
@@ -660,12 +1047,18 @@ function realTimeTick(prevState, nowMs = Date.now()) {
   state.meta.lastProcessedAt = target;
   state.meta.currentTime = new Date(target).toISOString();
   state.meta.totalRealTimeHours = (state.meta.totalRealTimeHours || 0) + (target - previousMs) / 3600000;
-  checkBankruptcy(state);
+  checkBankruptcy(state, target);
   return state;
 }
 
 function processRealTimeDay(state, fromMs, toMs, rng) {
   const elapsed = toMs - fromMs;
+  restoreMaintenanceRealTime(state, toMs);
+  const routeOperationalPlans = {};
+  state.routes.filter(r => r.status === 'ACTIVE').forEach(r => {
+    routeOperationalPlans[r.id] = buildOperationalPlan(state, r, fromMs, toMs, rng);
+  });
+  const periodOps = { scheduledFlights: 0, operatedFlights: 0, cancelledFlights: 0, delayedFlights: 0 };
   const marketKeys = new Set();
   state.routes.filter(r => r.status === 'ACTIVE').forEach(r => {
     marketKeys.add(r.originId + '|' + r.destId);
@@ -678,6 +1071,7 @@ function processRealTimeDay(state, fromMs, toMs, rng) {
   state._priorShareCache = {};
   const routeRevenue = {};
   const routePax = {};
+  const routeBookedPax = {};
   const compRouteRevenue = {};
 
   marketKeys.forEach(key => {
@@ -694,20 +1088,27 @@ function processRealTimeDay(state, fromMs, toMs, rng) {
         const freq = Math.max(1, product.freq);
         const weeklyPax = e.pax;
         const departures = product.legs === 1
-          ? scheduledDeparturesBetween(product.route, fromMs, toMs)
-          : Math.min(scheduledDeparturesBetween(product.route, fromMs, toMs), scheduledDeparturesBetween(product.secondRoute, fromMs, toMs));
+          ? (routeOperationalPlans[product.route.id]?.operatedFlights || 0)
+          : Math.min(routeOperationalPlans[product.route.id]?.operatedFlights || 0, routeOperationalPlans[product.secondRoute.id]?.operatedFlights || 0);
+        const scheduledDepartures = product.legs === 1
+          ? (routeOperationalPlans[product.route.id]?.scheduledFlights || 0)
+          : Math.min(routeOperationalPlans[product.route.id]?.scheduledFlights || 0, routeOperationalPlans[product.secondRoute.id]?.scheduledFlights || 0);
         const flightsShare = departures / freq;
+        const bookedShare = scheduledDepartures / freq;
         const pax = weeklyPax * flightsShare;
+        const bookedPax = weeklyPax * bookedShare;
         const rev = pax * e.fare;
         if (product.legs === 1) {
           routeRevenue[product.route.id] = (routeRevenue[product.route.id] || 0) + rev;
           routePax[product.route.id] = (routePax[product.route.id] || 0) + pax;
+          routeBookedPax[product.route.id] = (routeBookedPax[product.route.id] || 0) + bookedPax;
         } else {
           // A connecting itinerary generates revenue for both operating legs.
           const split = rev / 2;
           [product.route, product.secondRoute].forEach(leg => {
             routeRevenue[leg.id] = (routeRevenue[leg.id] || 0) + split;
             routePax[leg.id] = (routePax[leg.id] || 0) + pax;
+            routeBookedPax[leg.id] = (routeBookedPax[leg.id] || 0) + bookedPax;
           });
         }
       } else if (e.owner.startsWith('AI:')) {
@@ -723,20 +1124,51 @@ function processRealTimeDay(state, fromMs, toMs, rng) {
 
   let revenue = 0, costs = 0;
   v3RefreshOperationalCounters(state);
-  v3ProcessRecurringCosts(state, elapsed);
-  const breakdown = { fuel: 0, crew: 0, maint: 0, airport: 0, handling: 0, leasing: 0, distribution: 0, insurance: 0, overhead: 0, interest: 0 };
+  const breakdown = { fuel: 0, crew: 0, maint: 0, airport: 0, handling: 0, leasing: 0, distribution: 0, disruption: 0, depreciation: 0, insurance: 0, overhead: 0, interest: 0, taxes: 0 };
+  const recurring = v3ProcessRecurringCosts(state, elapsed);
+  costs += recurring.labor + recurring.insurance;
+  breakdown.crew += recurring.labor;
+  breakdown.insurance += recurring.insurance;
+  const depreciation = calculateDepreciationExpense(state, elapsed);
+  breakdown.depreciation += depreciation;
+  v3BookAccounting(state, 'depreciationExpense', depreciation);
 
   state.routes.forEach(route => {
     if (route.status !== 'ACTIVE') return;
     const type = aircraftType(route.aircraftTypeId);
     const dist = distanceBetween(route.originId, route.destId);
-    const flights = scheduledDeparturesBetween(route, fromMs, toMs);
-    if (!flights) return;
+    const plan = routeOperationalPlans[route.id] || buildOperationalPlan(state, route, fromMs, toMs, rng);
+    periodOps.scheduledFlights += plan.scheduledFlights;
+    periodOps.operatedFlights += plan.operatedFlights;
+    periodOps.cancelledFlights += plan.cancelledFlights;
+    periodOps.delayedFlights += plan.delayedFlights;
+    state.operations.cancelledFlights += plan.cancelledFlights;
+    state.operations.delayedFlights += plan.delayedFlights;
+    const flights = plan.operatedFlights;
     const pax = routePax[route.id] || 0;
+    const bookedPax = routeBookedPax[route.id] || pax;
     const routeRev = routeRevenueValue(routeRevenue, route.id);
-    const fuelCost = fuelBurnLiters(dist, type) * flights * state.market.fuelPrice;
+    const disruption = passengerDisruptionCost(state, route, plan, bookedPax);
+    const accounting = v3EnsureFinance(state);
+    if (disruption.totalUSD > 0) {
+      costs += disruption.totalUSD;
+      breakdown.disruption += disruption.totalUSD;
+      accounting.disruptionExpense = (accounting.disruptionExpense || 0) + disruption.totalUSD;
+      addLedger(state, state.meta.week, 'PASSENGER_RIGHTS', -disruption.totalUSD, 'Indemnisation, assistance et réacheminement passagers');
+    }
+    if (!flights) {
+      if (plan.scheduledFlights) {
+        route.history = route.history || [];
+        route.history.push({ time: new Date(toMs).toISOString(), week: state.meta.week, pax: 0, revenue: 0, cost: disruption.totalUSD, loadFactor: 0, scheduledFlights: plan.scheduledFlights, operatedFlights: 0, cancelledFlights: plan.cancelledFlights, delayedFlights: 0 });
+        if (route.history.length > 365) route.history.splice(0, route.history.length - 365);
+      }
+      return;
+    }
+    const fuelPlan = buildFuelPlan(dist, type);
+    const fuelLitersBurned = fuelPlan.expectedBurnLiters * flights;
+    const fuelCost = fuelLitersBurned * state.market.fuelPrice;
     const blockH = blockTimeHours(dist, type.cruiseKmh) * flights;
-    const crewCost = type.crew * 95 * blockH;
+    const crewCost = crewCostForOperations(type, blockH, flights);
     const cond = avgConditionForRoute(state, route);
     const ageMult = clamp(1.25 + (100 - cond) / 80, 1, 1.8);
     const maintCost = type.maintPerHour * blockH * ageMult;
@@ -747,7 +1179,7 @@ function processRealTimeDay(state, fromMs, toMs, rng) {
     const routeCost = fuelCost + crewCost + maintCost + airportCost + handlingCost + distributionCost;
 
     const ancillary = v3AddAncillaryRevenue(state, routeRev);
-    const carbonCost = v3ApplyCarbonCost(state, fuelBurnLiters(dist, type) * flights);
+    const carbonCost = v3ApplyCarbonCost(state, fuelLitersBurned, route.originId, route.destId);
 
     revenue += routeRev + ancillary;
     costs += routeCost + carbonCost;
@@ -757,10 +1189,11 @@ function processRealTimeDay(state, fromMs, toMs, rng) {
     breakdown.airport += airportCost;
     breakdown.handling += handlingCost;
     breakdown.distribution += distributionCost;
+    breakdown.taxes += carbonCost;
 
-    const accounting = v3EnsureFinance(state);
     accounting.passengerRevenue = (accounting.passengerRevenue || 0) + routeRev;
     accounting.fuelExpense = (accounting.fuelExpense || 0) + fuelCost;
+    accounting.crewExpense = (accounting.crewExpense || 0) + crewCost;
     accounting.maintenanceExpense = (accounting.maintenanceExpense || 0) + maintCost;
     accounting.airportExpense = (accounting.airportExpense || 0) + airportCost;
     accounting.handlingExpense = (accounting.handlingExpense || 0) + handlingCost;
@@ -768,36 +1201,42 @@ function processRealTimeDay(state, fromMs, toMs, rng) {
 
     state.operations.totalPassengers += Math.round(pax);
     state.operations.completedFlights += flights;
+    plan.operatedDepartureTimes.forEach(departureAt => {
+      state.operations.activeFlightWindows.push({ routeId: route.id, departureAt, arrivalAt: departureAt + plan.blockHoursPerFlight * 3600000 });
+    });
 
     const loadFactor = flights ? pax / (type.seats * flights) : 0;
     route.history = route.history || [];
-    route.history.push({ time: new Date(toMs).toISOString(), week: state.meta.week, pax: Math.round(pax), revenue: routeRev, cost: routeCost, loadFactor });
+    route.history.push({ time: new Date(toMs).toISOString(), week: state.meta.week, pax: Math.round(pax), revenue: routeRev + ancillary, cost: routeCost + carbonCost + disruption.totalUSD, loadFactor, scheduledFlights: plan.scheduledFlights, operatedFlights: flights, cancelledFlights: plan.cancelledFlights, delayedFlights: plan.delayedFlights });
     if (route.history.length > 365) route.history.splice(0, route.history.length - 365);
     if (route.fareStrategy === 'YIELD_OPTIMIZED') adaptYield(route, loadFactor);
 
-    const assigned = state.fleet.filter(f => f.assignedRouteId === route.id && f.status === 'ACTIVE');
-    assigned.forEach(f => {
-      f.flightHours = (f.flightHours || 0) + blockH;
-      f.cycles = (f.cycles || 0) + flights;
-      f.condition = clamp(f.condition - blockH * 0.035, 10, 100);
-      if (f.condition < 55 && rng() < 0.02) {
-        f.status = 'MAINTENANCE';
-        f.maintUntil = toMs + 2 * DAY_MS;
-        const eventCost = type.maintPerHour * 25;
-        state.company.cash -= eventCost;
-        addLedger(state, state.meta.week, 'MAINT_UNSCHEDULED', -eventCost, 'Maintenance non programmée');
+    const assigned = state.fleet.filter(f => f.assignedRouteId === route.id && f.status === 'ACTIVE' && f.typeId === route.aircraftTypeId);
+    const blockPerFlight = blockTimeHours(dist, type.cruiseKmh);
+    assigned.forEach((f, index) => {
+      const baseFlights = Math.floor(flights / assigned.length);
+      const tailFlights = baseFlights + (index < (flights % assigned.length) ? 1 : 0);
+      if (!tailFlights) return;
+      const usage = applyAircraftUsage(state, f, type, tailFlights, blockPerFlight * tailFlights, toMs, rng);
+      if (usage.maintenanceCost > 0) {
+        costs += usage.maintenanceCost;
+        breakdown.maint += usage.maintenanceCost;
+        accounting.maintenanceExpense = (accounting.maintenanceExpense || 0) + usage.maintenanceCost;
+        addLedger(state, state.meta.week, usage.scheduled ? 'MAINT_SCHEDULED' : 'MAINT_UNSCHEDULED', -usage.maintenanceCost, usage.scheduled ? 'Visite de maintenance programmée' : 'Maintenance non programmée');
       }
     });
   });
 
-  const fleetValueNow = fleetValue(state);
-  const insurance = 0;
+  const leasing = state.fleet
+    .filter(f => f.ownership === 'LEASED')
+    .reduce((sum, f) => sum + prorateWeekly(aircraftType(f.typeId).leaseWeekly, elapsed), 0);
   const overhead = prorateWeekly(9000 + state.fleet.length * 900 + state.routes.filter(r => r.status === 'ACTIVE').length * 300, elapsed);
-  breakdown.insurance = insurance;
+  breakdown.leasing = leasing;
   breakdown.overhead = overhead;
-  costs += overhead;
+  costs += leasing + overhead;
 
   const accounting2 = v3EnsureFinance(state);
+  accounting2.leasingExpense = (accounting2.leasingExpense || 0) + leasing;
   accounting2.overheadExpense = (accounting2.overheadExpense || 0) + overhead;
 
   let interestPaid = 0, principalPaid = 0;
@@ -815,21 +1254,45 @@ function processRealTimeDay(state, fromMs, toMs, rng) {
   accounting3.interestExpense = (accounting3.interestExpense || 0) + interestPaid;
 
   state.company.cash += revenue - costs - principalPaid;
-  const netIncome = revenue - costs;
-  state.finance.plHistory.push({ week: state.meta.week, time: new Date(toMs).toISOString(), revenue, costs, netIncome, breakdown });
-  if (state.finance.plHistory.length > 365) state.finance.plHistory.splice(0, state.finance.plHistory.length - 365);
-  state.finance.cashHistory.push({ week: state.meta.week, time: new Date(toMs).toISOString(), cash: state.company.cash });
-  if (state.finance.cashHistory.length > 730) state.finance.cashHistory.splice(0, state.finance.cashHistory.length - 730);
-  if (revenue || costs) {
-    addLedger(state, state.meta.week, 'REVENUE', revenue, 'Recettes en temps réel');
-    addLedger(state, state.meta.week, 'COSTS', -costs, 'Coûts en temps réel');
-  }
+  const accountingCosts = costs + depreciation;
+  const netIncome = revenue - accountingCosts;
+  upsertWeeklyFinanceHistory(state, toMs, revenue, accountingCosts, netIncome, breakdown);
 
   state.fleet.forEach(f => { f.ageWeeks = (f.ageWeeks || 0) + elapsed / WEEK_MS; });
-  state.operations.activeFlights = state.routes.filter(r => r.status === 'ACTIVE').length;
-  runCompetitorAI(state, rng, compRouteRevenue);
-  updateReputationAndOtp(state, rng);
-  maybeTriggerEvent(state, rng);
+  state.operations.activeFlightWindows = (state.operations.activeFlightWindows || []).filter(f => f.arrivalAt > toMs);
+  state.operations.activeFlights = state.operations.activeFlightWindows.filter(f => f.departureAt <= toMs && f.arrivalAt > toMs).length;
+  runCompetitorAI(state, rng, compRouteRevenue, elapsed);
+  updateReputationAndOtp(state, rng, elapsed, periodOps);
+  maybeTriggerEvent(state, rng, elapsed);
+}
+
+function upsertWeeklyFinanceHistory(state, toMs, revenue, costs, netIncome, breakdown) {
+  const date = new Date(toMs);
+  const week = getISOWeek(date);
+  const year = date.getUTCFullYear();
+  const periodKey = year + '-W' + String(week).padStart(2, '0');
+  const time = date.toISOString();
+  const last = state.finance.plHistory[state.finance.plHistory.length - 1];
+
+  if (last?.periodKey === periodKey) {
+    last.time = time;
+    last.revenue += revenue;
+    last.costs += costs;
+    last.netIncome += netIncome;
+    Object.keys(breakdown).forEach(key => { last.breakdown[key] = (last.breakdown[key] || 0) + (breakdown[key] || 0); });
+  } else {
+    state.finance.plHistory.push({ periodKey, year, week, time, revenue, costs, netIncome, breakdown: { ...breakdown } });
+  }
+  if (state.finance.plHistory.length > 156) state.finance.plHistory.splice(0, state.finance.plHistory.length - 156);
+
+  const cashLast = state.finance.cashHistory[state.finance.cashHistory.length - 1];
+  if (cashLast?.periodKey === periodKey) {
+    cashLast.time = time;
+    cashLast.cash = state.company.cash;
+  } else {
+    state.finance.cashHistory.push({ periodKey, year, week, time, cash: state.company.cash });
+  }
+  if (state.finance.cashHistory.length > 156) state.finance.cashHistory.splice(0, state.finance.cashHistory.length - 156);
 }
 
 function routeRevenueValue(map, id) { return map[id] || 0; }
@@ -846,13 +1309,24 @@ function updateMacroRealTime(state, rng, elapsedMs) {
 
 function processDeliveriesRealTime(state, nowMs) {
   state.orders = state.orders.filter(o => {
-    if (!o.deliveryAt) o.deliveryAt = nowMs + Math.max(1, o.weeksLeft || 1) * 7 * DAY_MS;
+    if (!o.deliveryAt) o.deliveryAt = nowMs + Math.max(1, o.weeksLeft || 1) * WEEK_MS;
+    o.weeksLeft = Math.max(0, (o.deliveryAt - nowMs) / WEEK_MS);
     if (o.deliveryAt <= nowMs) {
       state.fleet.push({ id: 'AC' + (state.company.nextAircraftSerial++), typeId: o.typeId, ownership: o.ownership, ageWeeks: 0, cycles: 0, flightHours: 0, condition: 100, status: 'ACTIVE', assignedRouteId: null });
       state.log.push({ week: state.meta.week, type: 'DELIVERY', text: `Livraison d'un ${aircraftType(o.typeId).name}.` });
       return false;
     }
     return true;
+  });
+}
+
+function restoreMaintenanceRealTime(state, nowMs) {
+  state.fleet.forEach(f => {
+    if (f.status !== 'MAINTENANCE' || !f.maintUntil || f.maintUntil > nowMs) return;
+    f.status = 'ACTIVE';
+    f.condition = clamp(f.condition + 20, 0, 100);
+    delete f.maintUntil;
+    state.log.push({ week: state.meta.week, type: 'MAINT', text: `${f.id} est remis en service après maintenance.` });
   });
 }
 
@@ -863,14 +1337,18 @@ function avgConditionForRoute(state, route) {
 }
 
 function adaptYield(route, loadFactor) {
-  route._yieldMult = route._yieldMult || 1.0;
-  route._yieldAlloc = route._yieldAlloc || { ...FARE_STRATEGIES.YIELD_OPTIMIZED.alloc };
+  const base = FARE_STRATEGIES.YIELD_OPTIMIZED;
+  route._yieldMult = route._yieldMult || base.refMult;
+  route._yieldAlloc = route._yieldAlloc || { ...base.alloc };
   if (loadFactor > 0.88) {
     route._yieldMult = clamp(route._yieldMult + 0.015, 0.9, 1.35);
+    route._yieldAlloc.deep = clamp(route._yieldAlloc.deep - 0.01, 0.03, 0.25);
+    route._yieldAlloc.prem = clamp(route._yieldAlloc.prem + 0.01, 0.08, 0.30);
   } else if (loadFactor < 0.55) {
     route._yieldMult = clamp(route._yieldMult - 0.015, 0.75, 1.1);
+    route._yieldAlloc.deep = clamp(route._yieldAlloc.deep + 0.01, 0.08, 0.35);
+    route._yieldAlloc.prem = clamp(route._yieldAlloc.prem - 0.01, 0.04, 0.20);
   }
-  FARE_STRATEGIES.YIELD_OPTIMIZED.refMult = route._yieldMult; // simplified single global adaptive dial
 }
 
 function updateMacro(state, rng) {
@@ -917,31 +1395,53 @@ function processMaintenance(state, rng) {
   });
 }
 
-function updateReputationAndOtp(state, rng) {
-  const fleetCondition = state.fleet.length ? state.fleet.reduce((s, f) => s + f.condition, 0) / state.fleet.length : 85;
-  const targetOtp = clamp(78 + fleetCondition / 6 - state.routes.filter(r => r.status === 'ACTIVE').length * 0.25 + (rng() - 0.5) * 6, 45, 98);
-  state.company.otp = state.company.otp + (targetOtp - state.company.otp) * 0.3;
-  const targetRep = clamp(40 + state.company.otp * 0.5, 0, 100);
-  state.company.reputation = clamp(state.company.reputation + (targetRep - state.company.reputation) * 0.06, 0, 100);
+function probabilityForElapsed(periodProbability, elapsedMs) {
+  const periods = Math.max(0, elapsedMs / WEEK_MS);
+  return 1 - Math.pow(1 - periodProbability, periods);
 }
 
-function runCompetitorAI(state, rng, compRouteRevenue) {
+function updateReputationAndOtp(state, rng, elapsedMs = WEEK_MS, operationalPeriod = null) {
+  const periods = Math.max(0, elapsedMs / WEEK_MS);
+  const fleetCondition = state.fleet.length ? state.fleet.reduce((s, f) => s + f.condition, 0) / state.fleet.length : 85;
+  let targetOtp;
+  let cancellationRate = 0;
+
+  if (operationalPeriod?.scheduledFlights > 0) {
+    const completed = operationalPeriod.operatedFlights;
+    const onTime = Math.max(0, completed - operationalPeriod.delayedFlights);
+    const punctuality = completed > 0 ? (onTime / completed) * 100 : 0;
+    const completion = (completed / operationalPeriod.scheduledFlights) * 100;
+    cancellationRate = operationalPeriod.cancelledFlights / operationalPeriod.scheduledFlights;
+    targetOtp = clamp(punctuality * 0.85 + completion * 0.15, 30, 99.5);
+  } else {
+    targetOtp = clamp(80 + fleetCondition / 7 - state.routes.filter(r => r.status === 'ACTIVE').length * 0.15 + (rng() - 0.5) * 2, 55, 98);
+  }
+
+  const otpAlpha = 1 - Math.pow(1 - 0.3, periods);
+  state.company.otp = state.company.otp + (targetOtp - state.company.otp) * otpAlpha;
+  const targetRep = clamp(42 + state.company.otp * 0.48 - cancellationRate * 35, 0, 100);
+  const repAlpha = 1 - Math.pow(1 - 0.06, periods);
+  state.company.reputation = clamp(state.company.reputation + (targetRep - state.company.reputation) * repAlpha, 0, 100);
+}
+
+function runCompetitorAI(state, rng, compRouteRevenue, elapsedMs = WEEK_MS) {
   state.market.competitors.forEach(c => {
     c.routes.forEach(r => {
       const rev = compRouteRevenue['P-' + r.id] || 0;
       r.history.push(rev);
       if (r.history.length > 8) r.history.shift();
       const type = aircraftType(r.aircraftTypeId);
-      const cost = fuelBurnLiters(distanceBetween(r.origin, r.dest), type) * r.freq * state.market.fuelPrice * 1.3;
+      const periods = elapsedMs / WEEK_MS;
+      const cost = fuelBurnLiters(distanceBetween(r.origin, r.dest), type) * r.freq * state.market.fuelPrice * 1.3 * periods;
       const margin = rev - cost;
-      if (margin < -cost * 0.3 && rng() < 0.25) {
+      if (margin < -cost * 0.3 && rng() < probabilityForElapsed(0.25, elapsedMs)) {
         r.fareStrategy = r.fareStrategy === 'PREMIUM' ? 'COMPETITIVE' : r.fareStrategy === 'COMPETITIVE' ? 'VALUE' : r.fareStrategy;
-      } else if (margin > cost * 0.5 && rng() < 0.15) {
+      } else if (margin > cost * 0.5 && rng() < probabilityForElapsed(0.15, elapsedMs)) {
         r.fareStrategy = r.fareStrategy === 'VALUE' ? 'COMPETITIVE' : r.fareStrategy === 'COMPETITIVE' ? 'PREMIUM' : r.fareStrategy;
       }
     });
-    c.cash += (rng() - 0.42) * 1.5e6; // coarse abstracted cashflow drift for AI companies
-    if (rng() < 0.01 && c.routes.length < 14 && c.cash > 60e6) {
+    c.cash += (rng() - 0.42) * 1.5e6 * (elapsedMs / WEEK_MS);
+    if (rng() < probabilityForElapsed(0.01, elapsedMs) && c.routes.length < 14 && c.cash > 60e6) {
       const candidates = AIRPORTS.filter(a => a.id !== c.hub && !c.routes.find(r => r.dest === a.id));
       if (candidates.length) {
         const pick = candidates[Math.floor(rng() * candidates.length)];
@@ -956,8 +1456,8 @@ function runCompetitorAI(state, rng, compRouteRevenue) {
   });
 }
 
-function maybeTriggerEvent(state, rng) {
-  if (rng() < 0.05) {
+function maybeTriggerEvent(state, rng, elapsedMs = WEEK_MS) {
+  if (rng() < probabilityForElapsed(0.05, elapsedMs)) {
     const kinds = ['FUEL_SPIKE', 'TOURISM_BOOM', 'RECESSION_LOCAL', 'STRIKE'];
     const kind = kinds[Math.floor(rng() * kinds.length)];
     if (kind === 'FUEL_SPIKE') {
@@ -977,13 +1477,14 @@ function maybeTriggerEvent(state, rng) {
   }
 }
 
-function checkBankruptcy(state) {
+function checkBankruptcy(state, nowMs = Date.now()) {
   if (state.company.cash < -8e6) {
-    state.company._negativeStreak = (state.company._negativeStreak || 0) + 1;
+    if (!state.company.negativeCashSince) state.company.negativeCashSince = nowMs;
   } else {
-    state.company._negativeStreak = 0;
+    state.company.negativeCashSince = null;
+    return;
   }
-  if (state.company._negativeStreak >= 6) {
+  if (!state.company.bankrupt && nowMs - state.company.negativeCashSince >= 6 * WEEK_MS) {
     state.company.bankrupt = true;
     state.log.push({ week: state.meta.week, type: 'BANKRUPTCY', text: `Trésorerie négative prolongée : la compagnie est en cessation de paiements.` });
   }
@@ -997,10 +1498,57 @@ function structuredCloneLite(obj) {
 // 9. PLAYER ACTIONS
 // -----------------------------------------------------------------------------
 
+
+function buildWeeklySchedule(frequencyPerWeek, baseMinute) {
+  const frequency = Math.max(1, Math.round(frequencyPerWeek));
+  const dailyCounts = Array(7).fill(Math.floor(frequency / 7));
+  for (let i = 0; i < frequency % 7; i += 1) dailyCounts[i] += 1;
+  const schedule = [];
+  dailyCounts.forEach((count, dayOfWeek) => {
+    if (!count) return;
+    const spacing = count === 1 ? 0 : Math.min(600, Math.floor(720 / (count - 1)));
+    let first = baseMinute;
+    if (count > 1) first = clamp(baseMinute - spacing * (count - 1) / 2, 360, 21 * 60);
+    for (let wave = 0; wave < count; wave += 1) {
+      const minute = Math.round(clamp(first + wave * spacing, 300, 23 * 60 + 30));
+      schedule.push({ dayOfWeek, minute });
+    }
+  });
+  return schedule;
+}
+
+function deliveryLeadDays(type, ownership) {
+  if (ownership === 'LEASED') {
+    if (type.category === 'REGIONAL') return 21;
+    if (type.category?.startsWith('WIDEBODY')) return 45;
+    return 30;
+  }
+  if (type.category === 'REGIONAL') return 365;
+  if (type.category?.startsWith('WIDEBODY')) return 730;
+  return 540;
+}
+
+function calculateDepreciationExpense(state, elapsedMs) {
+  const years = elapsedMs / (365 * DAY_MS);
+  return state.fleet
+    .filter(f => f.ownership === 'OWNED' && (f.ageWeeks || 0) / 52 < 25)
+    .reduce((sum, f) => {
+      const type = aircraftType(f.typeId);
+      const depreciableBase = type.price * 0.85; // 15% residual value
+      return sum + (depreciableBase / 25) * years;
+    }, 0);
+}
+
 function actionOpenRoute(state, { originId, destId, aircraftTypeId, frequencyPerWeek, fareStrategy, departMinute }) {
   const s = structuredCloneLite(state);
+  const issues = validateRoutePlan({ originId, destId, aircraftTypeId, departMinute });
+  if (issues.length) {
+    s.lastActionError = issues.map(issue => issue.message).join(' ');
+    return s;
+  }
+  delete s.lastActionError;
   const id = 'R' + (s.company.nextRouteSerial++);
-  const schedule = Array.from({ length: frequencyPerWeek }, (_, i) => ({ dayOfWeek: i % 7, minute: departMinute }));
+  const schedule = buildWeeklySchedule(frequencyPerWeek, departMinute);
   s.routes.push({ id, originId, destId, aircraftTypeId, frequencyPerWeek, fareStrategy: fareStrategy || 'COMPETITIVE', schedule, status: 'ACTIVE', history: [] });
   return s;
 }
@@ -1017,7 +1565,7 @@ function actionSetFrequency(state, routeId, frequencyPerWeek) {
   const r = s.routes.find(x => x.id === routeId);
   if (r) {
     r.frequencyPerWeek = frequencyPerWeek;
-    r.schedule = Array.from({ length: frequencyPerWeek }, (_, i) => ({ dayOfWeek: i % 7, minute: r.schedule[0]?.minute ?? 480 }));
+    r.schedule = buildWeeklySchedule(frequencyPerWeek, r.schedule[0]?.minute ?? 480);
   }
   return s;
 }
@@ -1032,20 +1580,33 @@ function actionSuspendRoute(state, routeId) {
 function actionBuyAircraft(state, typeId, ownership) {
   const s = structuredCloneLite(state);
   const type = aircraftType(typeId);
-  const leadDays = ownership === 'LEASED' ? 14 : 35;
+  if (!type) return { state: s, error: 'Type avion inconnu.' };
+  const leadDays = deliveryLeadDays(type, ownership);
+
   if (ownership === 'OWNED') {
-    if (s.company.cash < type.price * 0.2) return { state: s, error: 'Trésorerie insuffisante pour un apport minimal.' };
-    s.company.cash -= type.price * 0.2;
-    const principal = type.price * 0.8;
-    const weeklyRate = 0.00125; // ~6.7% annualized
-    const termWeeks = 520; // 10-year amortization
+    const equityShare = 0.15;
+    const downPayment = type.price * equityShare;
+    if (s.company.cash < downPayment) return { state: s, error: 'Trésorerie insuffisante pour l’apport de financement.' };
+    s.company.cash -= downPayment;
+    const principal = type.price - downPayment;
+    const annualRate = clamp(0.057 + Math.max(0, 60 - s.company.reputation) * 0.0008 + (s.company.cash < 10e6 ? 0.012 : 0), 0.05, 0.105);
+    const weeklyRate = Math.pow(1 + annualRate, 1 / 52) - 1;
+    const termWeeks = 624; // 12 years
     const annuityFactor = weeklyRate / (1 - Math.pow(1 + weeklyRate, -termWeeks));
-    const loan = {
-      id: 'L' + Date.now() % 100000, principal, weeklyRate,
+    s.finance.loans.push({
+      id: 'L' + Date.now() % 100000, principal, weeklyRate, annualRate,
       remainingWeeks: termWeeks, weeklyPayment: principal * annuityFactor,
-    };
-    s.finance.loans.push(loan);
+      assetTypeId: typeId,
+    });
+  } else if (ownership === 'LEASED') {
+    const securityDeposit = type.leaseWeekly * 8;
+    if (s.company.cash < securityDeposit) return { state: s, error: 'Trésorerie insuffisante pour le dépôt de garantie du bail.' };
+    s.company.cash -= securityDeposit;
+    s.finance.leaseDeposits = (s.finance.leaseDeposits || 0) + securityDeposit;
+    s.orders.push({ typeId, ownership, securityDeposit, weeksLeft: leadDays / 7, deliveryAt: Date.now() + leadDays * DAY_MS });
+    return { state: s, error: null };
   }
+
   s.orders.push({ typeId, ownership, weeksLeft: leadDays / 7, deliveryAt: Date.now() + leadDays * DAY_MS });
   return { state: s, error: null };
 }
@@ -1053,7 +1614,21 @@ function actionBuyAircraft(state, typeId, ownership) {
 function actionAssignAircraft(state, aircraftId, routeId) {
   const s = structuredCloneLite(state);
   const f = s.fleet.find(x => x.id === aircraftId);
-  if (f) f.assignedRouteId = routeId;
+  const route = s.routes.find(x => x.id === routeId);
+  delete s.lastActionError;
+  if (!f || !route) {
+    s.lastActionError = 'Appareil ou ligne introuvable.';
+    return s;
+  }
+  if (f.status !== 'ACTIVE') {
+    s.lastActionError = `${f.id} n’est pas disponible pour affectation.`;
+    return s;
+  }
+  if (f.typeId !== route.aircraftTypeId) {
+    s.lastActionError = `Le type de ${f.id} ne correspond pas au type programmé sur ${route.id}.`;
+    return s;
+  }
+  f.assignedRouteId = routeId;
   return s;
 }
 
@@ -1100,23 +1675,36 @@ function minuteToHHMM(m) { const h = Math.floor(m / 60), mm = m % 60; return Str
 // -----------------------------------------------------------------------------
 async function loadSave() {
   try {
-    const res = await window.storage.get(SAVE_KEY, false);
-    if (!res) return null;
-    return JSON.parse(res.value);
+    if (window.storage?.get) {
+      const res = await window.storage.get(SAVE_KEY, false);
+      if (res?.value) return JSON.parse(res.value);
+    }
+  } catch (e) { /* fall through to localStorage */ }
+  try {
+    const raw = window.localStorage?.getItem(SAVE_KEY);
+    return raw ? JSON.parse(raw) : null;
   } catch (e) {
     return null;
   }
 }
 async function writeSave(state) {
+  const payload = JSON.stringify(state);
   try {
-    await window.storage.set(SAVE_KEY, JSON.stringify(state), false);
+    if (window.storage?.set) {
+      await window.storage.set(SAVE_KEY, payload, false);
+      return true;
+    }
+  } catch (e) { /* fall through to localStorage */ }
+  try {
+    window.localStorage?.setItem(SAVE_KEY, payload);
     return true;
   } catch (e) {
     return false;
   }
 }
 async function clearSave() {
-  try { await window.storage.delete(SAVE_KEY, false); } catch (e) { /* noop */ }
+  try { if (window.storage?.delete) await window.storage.delete(SAVE_KEY, false); } catch (e) { /* noop */ }
+  try { window.localStorage?.removeItem(SAVE_KEY); } catch (e) { /* noop */ }
 }
 
 // -----------------------------------------------------------------------------
@@ -1454,7 +2042,8 @@ function NewRouteForm({ state, dispatch, availableAircraft, onDone }) {
 
   const acObj = availableAircraft.find(a => a.id === aircraftId);
   const type = acObj ? aircraftType(acObj.typeId) : null;
-  const reachable = type ? AIRPORTS.filter(a => a.id !== originId && distanceBetween(originId, a.id) <= type.rangeKm) : [];
+  const reachable = type ? AIRPORTS.filter(a => a.id !== originId && distanceBetween(originId, a.id) <= type.rangeKm && type.runway <= Math.min(airport(originId).runwayM || Infinity, a.runwayM || Infinity)) : [];
+  const planningIssues = destId && type ? validateRoutePlan({ originId, destId, aircraftTypeId: type.id, departMinute: slot }) : [];
 
   if (!availableAircraft.length) {
     return <Panel title="Nouvelle ligne"><div className="empty-hint">Aucun appareil disponible. Achetez ou libérez un appareil dans l'onglet Flotte.</div></Panel>;
@@ -1504,10 +2093,13 @@ function NewRouteForm({ state, dispatch, availableAircraft, onDone }) {
           </select>
         </label>
       </div>
-      {type && !reachable.length && <div className="empty-hint">Aucune destination à portée de cet appareil depuis cette origine.</div>}
-      <button className="btn btn-primary" disabled={!destId} onClick={() => {
+      {type && !reachable.length && <div className="empty-hint">Aucune destination techniquement exploitable avec cet appareil depuis cette origine.</div>}
+      {planningIssues.length > 0 && <div className="empty-hint">{planningIssues.map(issue => issue.message).join(' ')}</div>}
+      <button className="btn btn-primary" disabled={!destId || planningIssues.length > 0} onClick={() => {
         dispatch(s => {
+          const previousRouteCount = s.routes.length;
           let s2 = actionOpenRoute(s, { originId, destId, aircraftTypeId: type.id, frequencyPerWeek: freq, fareStrategy, departMinute: slot });
+          if (s2.routes.length === previousRouteCount) return s2;
           const newRoute = s2.routes[s2.routes.length - 1];
           s2 = actionAssignAircraft(s2, aircraftId, newRoute.id);
           return s2;
@@ -1528,7 +2120,7 @@ function FleetScreen({ state, dispatch, notify }) {
       <Panel title="Votre flotte" right={<button className="btn btn-sm btn-primary" onClick={() => setShowBuy(s => !s)}><Plus size={14} /> Acquérir un appareil</button>}>
         {state.fleet.length === 0 && <div className="empty-hint">Aucun appareil. Achetez ou louez votre premier avion.</div>}
         <table className="data-table">
-          <thead><tr><th>ID</th><th>Type</th><th>Propriété</th><th>Âge</th><th>État</th><th>Statut</th><th>Ligne affectée</th></tr></thead>
+          <thead><tr><th>ID</th><th>Type</th><th>Propriété</th><th>Âge</th><th>Heures</th><th>Cycles</th><th>État</th><th>Statut</th><th>Ligne affectée</th></tr></thead>
           <tbody>
             {state.fleet.map(f => {
               const t = aircraftType(f.typeId);
@@ -1539,6 +2131,8 @@ function FleetScreen({ state, dispatch, notify }) {
                   <td>{t.name}</td>
                   <td>{f.ownership === 'OWNED' ? 'Propriété' : 'Location'}</td>
                   <td className="mono">{(f.ageWeeks / 52).toFixed(1)} ans</td>
+                  <td className="mono">{fmtNum(f.flightHours || 0)} h</td>
+                  <td className="mono">{fmtNum(f.cycles || 0)}</td>
                   <td style={{ minWidth: 110 }}><ConditionBar value={f.condition} /></td>
                   <td><span className={'badge ' + (f.status === 'ACTIVE' ? 'badge-good' : 'badge-mid')}>{f.status === 'ACTIVE' ? 'En service' : 'Maintenance'}</span></td>
                   <td>{route ? `${route.originId} → ${route.destId}` : <span className="text-dim">Non affecté</span>}</td>
@@ -1555,7 +2149,7 @@ function FleetScreen({ state, dispatch, notify }) {
             <thead><tr><th>Type</th><th>Propriété</th><th>Livraison estimée</th></tr></thead>
             <tbody>
               {state.orders.map((o, i) => (
-                <tr key={i}><td>{aircraftType(o.typeId).name}</td><td>{o.ownership === 'OWNED' ? 'Propriété' : 'Location'}</td><td>{o.weeksLeft} semaine(s)</td></tr>
+                <tr key={i}><td>{aircraftType(o.typeId).name}</td><td>{o.ownership === 'OWNED' ? 'Propriété' : 'Location'}</td><td>{Math.max(0, o.weeksLeft || 0).toFixed(1)} semaine(s)</td></tr>
               ))}
             </tbody>
           </table>
@@ -1586,8 +2180,8 @@ function BuyAircraftForm({ state, dispatch, notify, onDone }) {
         <label className="field">
           <span>Mode d'acquisition</span>
           <select value={ownership} onChange={e => setOwnership(e.target.value)}>
-            <option value="LEASED">Location (pas d'apport, loyer hebdomadaire)</option>
-            <option value="OWNED">Achat (apport de 20 %, financement 10 ans)</option>
+            <option value="LEASED">Location (dépôt de garantie + loyer hebdomadaire)</option>
+            <option value="OWNED">Achat neuf (apport 15 %, financement 12 ans, délai de production)</option>
           </select>
         </label>
       </div>
@@ -1609,7 +2203,7 @@ function BuyAircraftForm({ state, dispatch, notify, onDone }) {
 // -----------------------------------------------------------------------------
 function FinanceScreen({ state }) {
   const pl = state.finance.plHistory.slice(-26);
-  const chartData = pl.map(p => ({ week: 'S' + p.week, Carburant: Math.round(p.breakdown.fuel), Équipage: Math.round(p.breakdown.crew), Maintenance: Math.round(p.breakdown.maint), Aéroports: Math.round(p.breakdown.airport), Autres: Math.round(p.breakdown.handling + p.breakdown.distribution + p.breakdown.insurance + p.breakdown.overhead + p.breakdown.interest + p.breakdown.leasing) }));
+  const chartData = pl.map(p => ({ week: 'S' + p.week, Carburant: Math.round(p.breakdown.fuel), Équipage: Math.round(p.breakdown.crew), Maintenance: Math.round(p.breakdown.maint), Aéroports: Math.round(p.breakdown.airport), Autres: Math.round(p.breakdown.handling + p.breakdown.distribution + (p.breakdown.disruption || 0) + (p.breakdown.depreciation || 0) + p.breakdown.insurance + p.breakdown.overhead + p.breakdown.interest + p.breakdown.leasing + (p.breakdown.taxes || 0)) }));
   const last = pl.length ? pl[pl.length - 1] : null;
   const fv = fleetValue(state);
 
@@ -1788,6 +2382,13 @@ function App() {
   const toastId = useRef(0);
   const [saveLabel, setSaveLabel] = useState('');
 
+  const persist = useCallback(async (s) => {
+    setSaveLabel('Enregistrement…');
+    const ok = await writeSave(s);
+    setSaveLabel(ok ? 'Sauvegardé' : 'Sauvegarde indisponible');
+    setTimeout(() => setSaveLabel(''), 1500);
+  }, []);
+
   useEffect(() => {
     let timer;
     (async () => {
@@ -1811,13 +2412,6 @@ function App() {
     const id = ++toastId.current;
     setToasts(t => [...t, { id, text, tone: tone || 'neutral' }]);
     setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 3200);
-  }, []);
-
-  const persist = useCallback(async (s) => {
-    setSaveLabel('Enregistrement…');
-    const ok = await writeSave(s);
-    setSaveLabel(ok ? 'Sauvegardé' : 'Sauvegarde indisponible');
-    setTimeout(() => setSaveLabel(''), 1500);
   }, []);
 
   const dispatch = useCallback((fn) => {

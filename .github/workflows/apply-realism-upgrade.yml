@@ -1,0 +1,43 @@
+name: Apply AeroDesk real-world operations upgrade
+
+on:
+  push:
+    branches:
+      - fix/aerodesk-v3-accounting-runtime
+    paths:
+      - scripts/apply_realism_upgrade.py
+      - .github/workflows/apply-realism-upgrade.yml
+
+permissions:
+  contents: write
+
+jobs:
+  improve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout realism branch
+        uses: actions/checkout@v4
+        with:
+          ref: fix/aerodesk-v3-accounting-runtime
+
+      - name: Apply realism upgrade
+        run: python3 scripts/apply_realism_upgrade.py
+
+      - name: Run engine regression tests
+        run: node --test tests/aerodesk-engine.test.mjs
+
+      - name: Validate JSX bundle
+        run: npx --yes esbuild aerodesk.jsx --bundle --loader:.jsx=jsx --external:react --external:recharts --external:lucide-react --outfile=/tmp/aerodesk-check.js
+
+      - name: Commit upgraded AeroDesk source
+        run: |
+          if git diff --quiet -- aerodesk.jsx; then
+            echo "No AeroDesk source changes to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add aerodesk.jsx
+          git commit -m "feat: add real-world airline operational constraints"
+          git push origin HEAD:fix/aerodesk-v3-accounting-runtime
