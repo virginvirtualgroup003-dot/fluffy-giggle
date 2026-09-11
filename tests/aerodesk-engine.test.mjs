@@ -10,9 +10,9 @@ function loadEngine() {
   assert.notEqual(start, -1, 'simulation engine marker must exist');
   assert.notEqual(end, -1, 'UI layer marker must exist');
 
-  const engine = source.slice(start, end) + `\n;globalThis.__engine = {\n    AIRCRAFT_TYPES, FARE_STRATEGIES, WEEK_MS, DAY_MS,\n    seededRandom, newGame, actionOpenRoute, actionAssignAircraft,\n    buildPlayerProducts, makeProductFromRoute, productFareForSegment, productUtility,\n    computeMarketOutcome, adaptYield, realTimeTick, checkBankruptcy, runCompetitorAI\n  };`;
+  const engine = source.slice(start, end) + `\n;globalThis.__engine = {\n    AIRPORTS, AIRCRAFT_TYPES, FARE_STRATEGIES, AERODESK_V3, WEEK_MS, DAY_MS,\n    seededRandom, newGame, actionOpenRoute, actionAssignAircraft,\n    buildPlayerProducts, makeProductFromRoute, productFareForSegment, productUtility,\n    computeMarketOutcome, adaptYield, realTimeTick, checkBankruptcy, runCompetitorAI,\n    scheduledDeparturesBetween, seasonalFactor,\n    validateRoutePlan: typeof validateRoutePlan === 'function' ? validateRoutePlan : undefined,\n    buildOperationalPlan: typeof buildOperationalPlan === 'function' ? buildOperationalPlan : undefined\n  };`;
 
-  const context = vm.createContext({ console, Date, Math, JSON, setTimeout, clearTimeout });
+  const context = vm.createContext({ console, Date, Math, JSON, Intl, setTimeout, clearTimeout });
   vm.runInContext(engine, context, { filename: 'aerodesk-engine.vm.js' });
   return context.__engine;
 }
@@ -129,4 +129,55 @@ test('connection utility penalises excessive connection slack', () => {
   const shortConnection = E.productUtility({ ...baseProduct, mctGap: 0.75 }, 'BUSINESS', marketState);
   const longConnection = E.productUtility({ ...baseProduct, mctGap: 3.0 }, 'BUSINESS', marketState);
   assert.ok(shortConnection > longConnection);
+});
+
+test('published schedules use airport local time and respect daylight saving time', () => {
+  const state = stateWithPlayerRoute();
+  const route = state.routes[0];
+  route.schedule = [{ dayOfWeek: 1, minute: 8 * 60 + 30 }]; // Monday 08:30 Paris local
+
+  const summer = E.scheduledDeparturesBetween(route, Date.UTC(2026, 6, 6, 6, 29), Date.UTC(2026, 6, 6, 6, 31));
+  const winter = E.scheduledDeparturesBetween(route, Date.UTC(2026, 0, 5, 7, 29), Date.UTC(2026, 0, 5, 7, 31));
+  assert.equal(summer, 1, '08:30 Europe/Paris should be 06:30 UTC in July');
+  assert.equal(winter, 1, '08:30 Europe/Paris should be 07:30 UTC in January');
+});
+
+test('route planning blocks real airport curfews and technically impossible missions', () => {
+  assert.equal(typeof E.validateRoutePlan, 'function');
+  const fraNight = E.validateRoutePlan({ originId: 'FRA', destId: 'CDG', aircraftTypeId: 'A320neo', departMinute: 23 * 60 + 30 });
+  assert.ok(fraNight.some(issue => issue.code === 'CURFEW_ORIGIN'));
+
+  const sydNight = E.validateRoutePlan({ originId: 'SYD', destId: 'AKL', aircraftTypeId: 'A320neo', departMinute: 23 * 60 + 30 });
+  assert.ok(sydNight.some(issue => issue.code === 'CURFEW_ORIGIN'));
+
+  const impossibleRange = E.validateRoutePlan({ originId: 'LHR', destId: 'JFK', aircraftTypeId: 'ATR72-600', departMinute: 8 * 60 + 30 });
+  assert.ok(impossibleRange.some(issue => issue.code === 'RANGE'));
+});
+
+test('southern hemisphere leisure seasonality is opposite to northern hemisphere seasonality', () => {
+  const northernJanuary = E.seasonalFactor('LEISURE', 2, 49);
+  const southernJanuary = E.seasonalFactor('LEISURE', 2, -34);
+  assert.ok(southernJanuary > northernJanuary, 'January should be a stronger summer leisure period in the southern hemisphere');
+});
+
+test('Jet A carbon factor is volume-correct rather than using the per-kilogram factor as per-litre', () => {
+  assert.ok(E.AERODESK_V3.co2KgPerLiterJetA >= 2.45 && E.AERODESK_V3.co2KgPerLiterJetA <= 2.60);
+});
+
+test('aircraft utilisation constrains impossible schedules and creates operational cancellations', () => {
+  assert.equal(typeof E.buildOperationalPlan, 'function');
+  const state = stateWithPlayerRoute();
+  const route = state.routes[0];
+  route.originId = 'LHR';
+  route.destId = 'JFK';
+  route.aircraftTypeId = '787-9';
+  route.frequencyPerWeek = 21;
+  route.schedule = Array.from({ length: 21 }, (_, i) => ({ dayOfWeek: i % 7, minute: 8 * 60 }));
+  state.fleet[0].typeId = '787-9';
+
+  const from = Date.UTC(2026, 0, 5, 0, 0);
+  const to = from + E.WEEK_MS;
+  const plan = E.buildOperationalPlan(state, route, from, to, E.seededRandom(12));
+  assert.ok(plan.scheduledFlights > plan.operatedFlights);
+  assert.ok(plan.cancelledFlights > 0);
 });
