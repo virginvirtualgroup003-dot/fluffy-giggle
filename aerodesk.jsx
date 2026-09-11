@@ -1,0 +1,1769 @@
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import {
+  LineChart, Line, AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid,
+  Tooltip, ResponsiveContainer, Legend,
+} from 'recharts';
+import {
+  Plane, TrendingUp, TrendingDown, AlertTriangle, Wallet, Users, Clock, MapPin,
+  Settings, HelpCircle, Wrench, Building2, Newspaper, Gauge, Plus, X, Check,
+  ChevronRight, LayoutDashboard, Network, Landmark, Globe2, ArrowRight, Trash2,
+} from 'lucide-react';
+
+// =============================================================================
+// SIMULATION ENGINE — Airline management game
+// Pure logic module. No UI. No I/O besides pure functions on a state object.
+// Reference-data provenance (see rule "no fake data presented as real"):
+//   - Airport coordinates: DERIVED (approximate public geographic knowledge)
+//   - Aircraft specs: DERIVED (approximate, rounded public general-knowledge figures,
+//     NOT manufacturer-certified performance data)
+//   - Airport size/tourist/vfr/corporate indices: SYNTHETIC (invented for balance)
+//   - Demand, pricing, competitor behavior: MODELED (game economy, not real stats)
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// 1. WORLD REFERENCE DATA
+// -----------------------------------------------------------------------------
+
+const AIRPORTS = [
+  { id: 'LHR', city: 'Londres', country: 'Royaume-Uni', lat: 51.47, lon: -0.45, size: 95, tourist: 80, vfr: 55, corp: 95, fee: 9000, infra: 90, curfew: false, region: 'EU' },
+  { id: 'CDG', city: 'Paris', country: 'France', lat: 49.01, lon: 2.55, size: 90, tourist: 85, vfr: 45, corp: 90, fee: 8000, infra: 88, curfew: false, region: 'EU' },
+  { id: 'FRA', city: 'Francfort', country: 'Allemagne', lat: 50.03, lon: 8.57, size: 88, tourist: 55, vfr: 40, corp: 92, fee: 7800, infra: 90, curfew: true, region: 'EU' },
+  { id: 'AMS', city: 'Amsterdam', country: 'Pays-Bas', lat: 52.31, lon: 4.76, size: 78, tourist: 70, vfr: 35, corp: 80, fee: 7000, infra: 85, curfew: false, region: 'EU' },
+  { id: 'MAD', city: 'Madrid', country: 'Espagne', lat: 40.47, lon: -3.57, size: 72, tourist: 75, vfr: 40, corp: 70, fee: 6000, infra: 80, curfew: false, region: 'EU' },
+  { id: 'FCO', city: 'Rome', country: 'Italie', lat: 41.80, lon: 12.25, size: 68, tourist: 88, vfr: 35, corp: 55, fee: 6200, infra: 72, curfew: false, region: 'EU' },
+  { id: 'JFK', city: 'New York', country: 'États-Unis', lat: 40.64, lon: -73.78, size: 98, tourist: 82, vfr: 60, corp: 96, fee: 9500, infra: 82, curfew: false, region: 'NA' },
+  { id: 'LAX', city: 'Los Angeles', country: 'États-Unis', lat: 33.94, lon: -118.41, size: 90, tourist: 78, vfr: 55, corp: 82, fee: 8500, infra: 78, curfew: false, region: 'NA' },
+  { id: 'ORD', city: 'Chicago', country: 'États-Unis', lat: 41.98, lon: -87.90, size: 82, tourist: 45, vfr: 40, corp: 85, fee: 7200, infra: 80, curfew: false, region: 'NA' },
+  { id: 'MIA', city: 'Miami', country: 'États-Unis', lat: 25.80, lon: -80.29, size: 65, tourist: 85, vfr: 70, corp: 55, fee: 6500, infra: 75, curfew: false, region: 'NA' },
+  { id: 'YYZ', city: 'Toronto', country: 'Canada', lat: 43.68, lon: -79.63, size: 72, tourist: 50, vfr: 60, corp: 75, fee: 6800, infra: 78, curfew: false, region: 'NA' },
+  { id: 'GRU', city: 'São Paulo', country: 'Brésil', lat: -23.43, lon: -46.47, size: 75, tourist: 45, vfr: 50, corp: 78, fee: 6000, infra: 65, curfew: false, region: 'SA' },
+  { id: 'EZE', city: 'Buenos Aires', country: 'Argentine', lat: -34.82, lon: -58.54, size: 55, tourist: 55, vfr: 45, corp: 55, fee: 5000, infra: 60, curfew: false, region: 'SA' },
+  { id: 'DXB', city: 'Dubaï', country: 'Émirats arabes unis', lat: 25.25, lon: 55.36, size: 80, tourist: 90, vfr: 65, corp: 88, fee: 7000, infra: 95, curfew: false, region: 'ME' },
+  { id: 'DEL', city: 'Delhi', country: 'Inde', lat: 28.56, lon: 77.10, size: 78, tourist: 55, vfr: 80, corp: 70, fee: 4500, infra: 68, curfew: false, region: 'AS' },
+  { id: 'SIN', city: 'Singapour', country: 'Singapour', lat: 1.36, lon: 103.99, size: 85, tourist: 80, vfr: 45, corp: 90, fee: 7500, infra: 96, curfew: false, region: 'AS' },
+  { id: 'HKG', city: 'Hong Kong', country: 'Chine (RAS)', lat: 22.31, lon: 113.91, size: 82, tourist: 75, vfr: 55, corp: 88, fee: 7500, infra: 92, curfew: false, region: 'AS' },
+  { id: 'NRT', city: 'Tokyo', country: 'Japon', lat: 35.76, lon: 140.39, size: 88, tourist: 72, vfr: 30, corp: 85, fee: 8200, infra: 82, curfew: true, region: 'AS' },
+  { id: 'ICN', city: 'Séoul', country: 'Corée du Sud', lat: 37.46, lon: 126.44, size: 78, tourist: 65, vfr: 35, corp: 78, fee: 6800, infra: 90, curfew: false, region: 'AS' },
+  { id: 'SYD', city: 'Sydney', country: 'Australie', lat: -33.95, lon: 151.18, size: 75, tourist: 78, vfr: 40, corp: 72, fee: 7200, infra: 80, curfew: true, region: 'OC' },
+  { id: 'JNB', city: 'Johannesburg', country: 'Afrique du Sud', lat: -26.13, lon: 28.24, size: 55, tourist: 55, vfr: 45, corp: 60, fee: 4800, infra: 62, curfew: false, region: 'AF' },
+  { id: 'CAI', city: 'Le Caire', country: 'Égypte', lat: 30.11, lon: 31.40, size: 48, tourist: 65, vfr: 60, corp: 45, fee: 4000, infra: 55, curfew: false, region: 'AF' },
+  { id: 'LOS', city: 'Lagos', country: 'Nigéria', lat: 6.58, lon: 3.32, size: 50, tourist: 25, vfr: 75, corp: 50, fee: 4200, infra: 48, curfew: false, region: 'AF' },
+  { id: 'AKL', city: 'Auckland', country: 'Nouvelle-Zélande', lat: -37.01, lon: 174.79, size: 45, tourist: 70, vfr: 30, corp: 50, fee: 5500, infra: 75, curfew: true, region: 'OC' },
+];
+
+const AIRCRAFT_TYPES = [
+  { id: 'TB70', name: 'TurboRégional 70', category: 'TURBOPROP', seats: 70, rangeKm: 1500, cruiseKmh: 510, cruiseBurn: 700, fixedBurn: 150, price: 28e6, leaseWeekly: 58000, crew: 4, maintPerHour: 900, turnaround: 25, noise: 35, runway: 1200 },
+  { id: 'RJ90', name: 'JetRégional 90', category: 'REGIONAL_JET', seats: 90, rangeKm: 2600, cruiseKmh: 830, cruiseBurn: 1900, fixedBurn: 500, price: 42e6, leaseWeekly: 95000, crew: 5, maintPerHour: 1500, turnaround: 35, noise: 55, runway: 1800 },
+  { id: 'NB180', name: 'MonoCouloir 180', category: 'NARROWBODY', seats: 180, rangeKm: 6300, cruiseKmh: 840, cruiseBurn: 2500, fixedBurn: 700, price: 112e6, leaseWeekly: 285000, crew: 6, maintPerHour: 1900, turnaround: 40, noise: 62, runway: 2100 },
+  { id: 'NB220XR', name: 'MonoCouloir 220 XR', category: 'NARROWBODY_XR', seats: 220, rangeKm: 7400, cruiseKmh: 840, cruiseBurn: 2650, fixedBurn: 750, price: 132e6, leaseWeekly: 330000, crew: 7, maintPerHour: 2100, turnaround: 45, noise: 63, runway: 2200 },
+  { id: 'WB300', name: 'BiCouloir 300', category: 'WIDEBODY_MED', seats: 296, rangeKm: 13500, cruiseKmh: 900, cruiseBurn: 5900, fixedBurn: 1600, price: 292e6, leaseWeekly: 655000, crew: 11, maintPerHour: 3600, turnaround: 90, noise: 58, runway: 2600 },
+  { id: 'WB330', name: 'BiCouloir 330', category: 'WIDEBODY_LARGE', seats: 325, rangeKm: 15000, cruiseKmh: 905, cruiseBurn: 6400, fixedBurn: 1700, price: 318e6, leaseWeekly: 705000, crew: 12, maintPerHour: 3850, turnaround: 95, noise: 57, runway: 2700 },
+  { id: 'WB400', name: 'BiCouloir 400', category: 'WIDEBODY_XL', seats: 396, rangeKm: 13600, cruiseKmh: 910, cruiseBurn: 7600, fixedBurn: 1950, price: 376e6, leaseWeekly: 830000, crew: 14, maintPerHour: 4400, turnaround: 110, noise: 68, runway: 3000 },
+  { id: 'WBULR', name: 'BiCouloir ULR', category: 'WIDEBODY_ULR', seats: 250, rangeKm: 17000, cruiseKmh: 905, cruiseBurn: 6100, fixedBurn: 1650, price: 335e6, leaseWeekly: 745000, crew: 13, maintPerHour: 3950, turnaround: 100, noise: 56, runway: 2800 },
+];
+
+const SEGMENTS = ['BUSINESS', 'LEISURE', 'VFR'];
+
+const FARE_STRATEGIES = {
+  DISCOUNT: { refMult: 0.85, alloc: { deep: 0.35, disc: 0.35, std: 0.20, flex: 0.07, prem: 0.03 } },
+  VALUE: { refMult: 0.95, alloc: { deep: 0.20, disc: 0.30, std: 0.30, flex: 0.12, prem: 0.08 } },
+  COMPETITIVE: { refMult: 1.00, alloc: { deep: 0.12, disc: 0.23, std: 0.35, flex: 0.18, prem: 0.12 } },
+  PREMIUM: { refMult: 1.25, alloc: { deep: 0.05, disc: 0.10, std: 0.25, flex: 0.30, prem: 0.30 } },
+  YIELD_OPTIMIZED: { refMult: 1.05, alloc: { deep: 0.12, disc: 0.22, std: 0.33, flex: 0.20, prem: 0.13 }, adaptive: true },
+};
+
+const COMPETITOR_TEMPLATES = [
+  { name: 'Meridian Air', strategy: 'PREMIUM_NETWORK', hub: 'FRA', theme: '#4FC1E9' },
+  { name: 'SkyValue', strategy: 'LOWCOST', hub: 'MAD', theme: '#E8A33D' },
+  { name: 'Pacific Crown', strategy: 'MEGA_HUB', hub: 'SIN', theme: '#8B7FD1' },
+  { name: 'Condor Regional', strategy: 'REGIONAL', hub: 'YYZ', theme: '#6FBF73' },
+];
+
+// -----------------------------------------------------------------------------
+// 2. UTILITIES
+// -----------------------------------------------------------------------------
+
+function airport(id) { return AIRPORTS.find(a => a.id === id); }
+function aircraftType(id) { return AIRCRAFT_TYPES.find(t => t.id === id); }
+
+function haversineKm(a, b) {
+  const R = 6371;
+  const dLat = (b.lat - a.lat) * Math.PI / 180;
+  const dLon = (b.lon - a.lon) * Math.PI / 180;
+  const la1 = a.lat * Math.PI / 180, la2 = b.lat * Math.PI / 180;
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(la1) * Math.cos(la2) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+
+function distanceBetween(idA, idB) {
+  return haversineKm(airport(idA), airport(idB));
+}
+
+function blockTimeHours(distanceKm, cruiseKmh) {
+  return distanceKm / cruiseKmh + 0.35; // taxi + climb/descent buffer
+}
+
+function fuelBurnLiters(distanceKm, type) {
+  const t = blockTimeHours(distanceKm, type.cruiseKmh);
+  const cruiseHours = Math.max(0, t - 0.4);
+  return type.fixedBurn + type.cruiseBurn * cruiseHours;
+}
+
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+function seededRandom(seed) {
+  let s = seed % 2147483647;
+  if (s <= 0) s += 2147483646;
+  return function () {
+    s = (s * 16807) % 2147483647;
+    return (s - 1) / 2147483646;
+  };
+}
+
+function softmax(utilities) {
+  const max = Math.max(...utilities);
+  const exps = utilities.map(u => Math.exp(u - max));
+  const sum = exps.reduce((a, b) => a + b, 0);
+  return exps.map(e => e / sum);
+}
+
+// -----------------------------------------------------------------------------
+// 3. DEMAND MODEL CONSTANTS (internal — not surfaced to the player)
+// -----------------------------------------------------------------------------
+
+const SEG_PARAMS = {
+  BUSINESS: { priceBeta: 0.0068, freqW: 0.45, schedW: 1.5, durW: 0.065, stopPen: 1.35, mctPen: 0.9, reputW: 1.4, otpW: 1.1, loyaltyW: 0.6, availW: 1.1, valueW: 0.15, outsideBase: -1.1, fareMult: 1.55 },
+  LEISURE: { priceBeta: 0.0075, freqW: 0.22, schedW: 0.55, durW: 0.035, stopPen: 0.55, mctPen: 0.45, reputW: 0.7, otpW: 0.5, loyaltyW: 0.25, availW: 0.2, valueW: 1.3, outsideBase: 0.35, fareMult: 0.82 },
+  VFR: { priceBeta: 0.0105, freqW: 0.15, schedW: 0.30, durW: 0.02, stopPen: 0.35, mctPen: 0.30, reputW: 0.35, otpW: 0.3, loyaltyW: 0.55, availW: 0.1, valueW: 1.6, outsideBase: -0.15, fareMult: 0.62 },
+};
+
+const SEG_POTENTIAL_K = { BUSINESS: 0.168, LEISURE: 0.272, VFR: 0.152 };
+
+function fareReference(distanceKm) {
+  return 55 + 0.115 * Math.pow(distanceKm, 0.84);
+}
+
+function groundAltBonus(distanceKm, seg) {
+  if (distanceKm > 1800) return 0;
+  const strength = seg === 'VFR' ? 1.3 : seg === 'LEISURE' ? 1.0 : 0.35;
+  return strength * Math.max(0, (1800 - distanceKm) / 1800) * 1.1;
+}
+
+function seasonalFactor(seg, weekOfYear) {
+  const phase = (weekOfYear / 52) * 2 * Math.PI;
+  if (seg === 'LEISURE') return 1 + 0.28 * Math.sin(phase - Math.PI / 2.3);
+  if (seg === 'VFR') return 1 + 0.22 * Math.sin(phase - Math.PI / 1.6);
+  return 1 + 0.08 * Math.sin(phase);
+}
+
+function marketSizeIndex(o, d) { return Math.sqrt(o.size * d.size); }
+
+function segmentBasePotential(o, d, distanceKm, seg, weekOfYear, macro) {
+  const size = marketSizeIndex(o, d);
+  const seasonal = seasonalFactor(seg, weekOfYear);
+  let val;
+  if (seg === 'BUSINESS') {
+    val = SEG_POTENTIAL_K.BUSINESS * size * Math.sqrt(o.corp * d.corp) / Math.pow(1 + distanceKm / 4000, 1.05);
+  } else if (seg === 'LEISURE') {
+    val = SEG_POTENTIAL_K.LEISURE * Math.pow(size, 0.92) * Math.sqrt(Math.max(o.tourist, d.tourist) * 10 + 20) / Math.pow(1 + distanceKm / 2500, 1.15) * seasonal;
+  } else {
+    val = SEG_POTENTIAL_K.VFR * Math.pow(size, 0.75) * Math.sqrt(o.vfr * d.vfr) / Math.pow(1 + distanceKm / 3000, 1.0) * seasonal;
+  }
+  return Math.max(0, val * macro.demandIndex);
+}
+
+// -----------------------------------------------------------------------------
+// 4. NEW GAME
+// -----------------------------------------------------------------------------
+
+function newGame(companyName, homeBaseId, rngSeed) {
+  const rng = seededRandom(rngSeed || Date.now() % 100000);
+  const competitors = COMPETITOR_TEMPLATES.map((tpl, i) => ({
+    id: 'C' + i, name: tpl.name, strategy: tpl.strategy, hub: tpl.hub, theme: tpl.theme,
+    cash: 180e6 + rng() * 60e6, reputation: 55 + rng() * 15,
+    fleet: [], routes: [],
+  }));
+  competitors.forEach(c => seedCompetitorNetwork(c, rng));
+
+  return {
+    version: 3,
+    meta: { week: 1, year: 1, weekOfYear: 1, createdAt: Date.now(), rngSeed: rngSeed || Date.now() % 100000 },
+    company: {
+      name: companyName, homeBase: homeBaseId, cash: 45e6, reputation: 50, otp: 88,
+      founded: true, bankrupt: false, nextAircraftSerial: 1, nextRouteSerial: 1,
+    },
+    fleet: [],
+    routes: [],
+    orders: [], // pending aircraft deliveries
+    finance: {
+      loans: [],
+      cashHistory: [{ week: 0, cash: 45e6 }],
+      plHistory: [],
+      ledgerRecent: [],
+    },
+    market: {
+      competitors,
+      fuelPrice: 0.82,
+      macro: { demandIndex: 1.0, fuelTrend: 0, cycle: 'NORMAL' },
+      events: [],
+    },
+    log: [{ week: 0, type: 'FOUNDING', text: `${companyName} est fondée avec sa base à ${airport(homeBaseId).city}.` }],
+  };
+}
+
+function seedCompetitorNetwork(c, rng) {
+  const near = AIRPORTS
+    .filter(a => a.id !== c.hub)
+    .map(a => ({ a, d: distanceBetween(c.hub, a.id) }))
+    .sort((x, y) => x.d - y.d);
+  const routeCount = c.strategy === 'MEGA_HUB' ? 10 : c.strategy === 'REGIONAL' ? 5 : 7;
+  const pickList = c.strategy === 'REGIONAL' ? near.slice(0, 8) : near.slice(0, 16);
+  const chosen = [];
+  while (chosen.length < routeCount && pickList.length) {
+    const idx = Math.floor(rng() * pickList.length);
+    chosen.push(pickList.splice(idx, 1)[0]);
+  }
+  chosen.forEach((entry, i) => {
+    const type = pickAircraftForDistance(entry.d, c.strategy);
+    const acId = 'CAC' + c.id + i;
+    c.fleet.push({ id: acId, typeId: type.id, condition: 80 + rng() * 15 });
+    c.routes.push({
+      id: 'CR' + c.id + i, origin: c.hub, dest: entry.a.id, aircraftTypeId: type.id,
+      freq: c.strategy === 'LOWCOST' ? 5 + Math.floor(rng() * 3) : 3 + Math.floor(rng() * 3),
+      fareStrategy: c.strategy === 'LOWCOST' ? 'DISCOUNT' : c.strategy === 'PREMIUM_NETWORK' ? 'PREMIUM' : 'COMPETITIVE',
+      refMultOverride: null,
+      history: [],
+    });
+  });
+}
+
+function pickAircraftForDistance(d, strategy) {
+  const candidates = AIRCRAFT_TYPES.filter(t => t.rangeKm >= d * 1.15);
+  const pool = candidates.length ? candidates : AIRCRAFT_TYPES.slice(-2);
+  if (strategy === 'REGIONAL') return pool[0];
+  if (d < 2000) return pool.find(t => t.category === 'NARROWBODY') || pool[0];
+  return pool[Math.floor(pool.length / 2)];
+}
+
+// -----------------------------------------------------------------------------
+// 5. PRODUCT / OFFER ENUMERATION FOR A MARKET (O,D)
+// -----------------------------------------------------------------------------
+
+function scheduleFitScore(seg, departSlots) {
+  // departSlots: array of minutes-from-midnight for this product's weekly departures
+  if (!departSlots.length) return 0;
+  const ideal = seg === 'BUSINESS' ? [7 * 60, 8 * 60 + 30, 17 * 60, 19 * 60] : [9 * 60, 14 * 60, 18 * 60];
+  let best = 0;
+  departSlots.forEach(slot => {
+    ideal.forEach(id => {
+      const diff = Math.min(Math.abs(slot - id), 1440 - Math.abs(slot - id));
+      const score = Math.max(0, 1 - diff / 300);
+      if (score > best) best = score;
+    });
+  });
+  return best;
+}
+
+function buildPlayerProducts(state, originId, destId) {
+  const products = [];
+  const direct = state.routes.find(r => r.status === 'ACTIVE' && r.originId === originId && r.destId === destId);
+  if (direct) {
+    products.push(makeProductFromRoute(direct, 'PLAYER', state.company, [direct]));
+  }
+  // one-stop via player's own hub(s): any active route origin->hub and hub->dest
+  const legsOut = state.routes.filter(r => r.status === 'ACTIVE' && r.originId === originId && r.destId !== destId);
+  legsOut.forEach(leg1 => {
+    const leg2 = state.routes.find(r => r.status === 'ACTIVE' && r.originId === leg1.destId && r.destId === destId);
+    if (leg2 && leg1.destId !== originId) {
+      products.push(makeConnectProduct([leg1, leg2], 'PLAYER', state.company));
+    }
+  });
+  return products;
+}
+
+function buildCompetitorProducts(state, originId, destId) {
+  const products = [];
+  state.market.competitors.forEach(c => {
+    const r = c.routes.find(rt => rt.origin === originId && rt.dest === destId);
+    if (r) products.push(makeProductFromCompetitorRoute(r, c));
+  });
+  return products;
+}
+
+function makeProductFromRoute(route, owner, company, legs) {
+  const oType = aircraftType(route.aircraftTypeId);
+  const dist = distanceBetween(route.originId, route.destId);
+  return {
+    key: 'P-' + route.id, owner, ownerRef: company, legs: 1, distanceKm: dist,
+    freq: route.frequencyPerWeek, fareStrategy: route.fareStrategy,
+    departSlots: route.schedule.map(s => s.minute),
+    totalTripHours: blockTimeHours(dist, oType.cruiseKmh),
+    reputation: company.reputation, otp: company.otp,
+    seats: oType.seats, route,
+  };
+}
+
+function makeConnectProduct(legs, owner, company) {
+  const [l1, l2] = legs;
+  const t1 = aircraftType(l1.aircraftTypeId), t2 = aircraftType(l2.aircraftTypeId);
+  const d1 = distanceBetween(l1.originId, l1.destId), d2 = distanceBetween(l2.originId, l2.destId);
+  const bt1 = blockTimeHours(d1, t1.cruiseKmh), bt2 = blockTimeHours(d2, t2.cruiseKmh);
+  const mct = 0.75; // 45 min minimum connection assumption
+  const connectSlack = 1.3; // average extra wait hours modeled
+  return {
+    key: 'P-' + l1.id + '-' + l2.id, owner, ownerRef: company, legs: 2,
+    distanceKm: d1 + d2,
+    freq: Math.min(l1.frequencyPerWeek, l2.frequencyPerWeek),
+    fareStrategy: l1.fareStrategy,
+    departSlots: l1.schedule.map(s => s.minute),
+    totalTripHours: bt1 + bt2 + mct + connectSlack,
+    reputation: company.reputation, otp: company.otp - 6,
+    seats: Math.min(t1.seats, t2.seats), route: l1, secondRoute: l2,
+    mctGap: connectSlack,
+  };
+}
+
+function makeProductFromCompetitorRoute(route, competitor) {
+  const type = aircraftType(route.aircraftTypeId);
+  const dist = distanceBetween(route.origin, route.dest);
+  const spreadSlots = [6 * 60 + 30, 11 * 60, 15 * 60, 19 * 60 + 30, 21 * 60];
+  const departSlots = Array.from({ length: Math.min(route.freq, 5) }, (_, i) => spreadSlots[i % spreadSlots.length]);
+  return {
+    key: 'P-' + route.id, owner: 'AI:' + competitor.id, ownerRef: competitor, legs: 1,
+    distanceKm: dist, freq: route.freq, fareStrategy: route.fareStrategy,
+    departSlots, totalTripHours: blockTimeHours(dist, type.cruiseKmh),
+    reputation: competitor.reputation, otp: 83, seats: type.seats, route,
+  };
+}
+
+// -----------------------------------------------------------------------------
+// 6. FARE + UTILITY + SHARE COMPUTATION
+// -----------------------------------------------------------------------------
+
+function productFareForSegment(product, seg) {
+  const strat = FARE_STRATEGIES[product.fareStrategy] || FARE_STRATEGIES.COMPETITIVE;
+  const ref = fareReference(product.distanceKm) * strat.refMult;
+  const p = SEG_PARAMS[seg];
+  return ref * p.fareMult;
+}
+
+function productUtility(product, seg, marketState) {
+  const p = SEG_PARAMS[seg];
+  const strat = FARE_STRATEGIES[product.fareStrategy] || FARE_STRATEGIES.COMPETITIVE;
+  const fare = productFareForSegment(product, seg);
+  const availShare = strat.alloc.flex + strat.alloc.prem;
+  const valueShare = strat.alloc.deep + strat.alloc.disc;
+  const sched = scheduleFitScore(seg, product.departSlots);
+  const priorShare = marketState.priorShare[product.owner] || 0;
+  let u = -p.priceBeta * fare
+    + p.availW * availShare
+    + p.valueW * valueShare
+    + p.freqW * Math.log(1 + product.freq)
+    + p.schedW * sched
+    - p.durW * product.totalTripHours
+    - p.stopPen * (product.legs - 1)
+    + p.reputW * (product.reputation - 50) / 50
+    + p.otpW * (product.otp - 80) / 20
+    + p.loyaltyW * priorShare;
+  return u;
+}
+
+function computeMarketOutcome(state, originId, destId, weekOfYear) {
+  const o = airport(originId), d = airport(destId);
+  const dist = distanceBetween(originId, destId);
+  const playerProducts = buildPlayerProducts(state, originId, destId);
+  const compProducts = buildCompetitorProducts(state, originId, destId);
+  const products = [...playerProducts, ...compProducts];
+  if (products.length === 0) return null;
+
+  const marketKey = originId + '-' + destId;
+  const priorShare = state._priorShareCache && state._priorShareCache[marketKey] || {};
+  const marketState = { priorShare };
+
+  const result = { originId, destId, distanceKm: dist, segments: {} };
+
+  SEGMENTS.forEach(seg => {
+    const potential = segmentBasePotential(o, d, dist, seg, weekOfYear, state.market.macro);
+    const utilities = products.map(pr => productUtility(pr, seg, marketState));
+    const outsideU = SEG_PARAMS[seg].outsideBase - groundAltBonus(dist, seg);
+    const shares = softmax([...utilities, outsideU]);
+    const segResult = { potential, products: [] };
+    products.forEach((pr, i) => {
+      const rawPax = shares[i] * potential;
+      segResult.products.push({ key: pr.key, owner: pr.owner, seg, pax: rawPax, fare: productFareForSegment(pr, seg) });
+    });
+    result.segments[seg] = segResult;
+  });
+
+  // capacity constraint + single-pass spill/recapture
+  applyCapacityConstraints(result, products);
+
+  return result;
+}
+
+function applyCapacityConstraints(result, products) {
+  const capUsed = {};
+  products.forEach(p => { capUsed[p.key] = 0; });
+  const capacity = {};
+  products.forEach(p => { capacity[p.key] = p.seats * p.freq; });
+
+  const allEntries = [];
+  SEGMENTS.forEach(seg => result.segments[seg].products.forEach(e => allEntries.push(e)));
+
+  // pass 1: raw fill, track overflow
+  let overflowPool = 0;
+  allEntries.forEach(e => {
+    const room = Math.max(0, capacity[e.key] - capUsed[e.key]);
+    if (e.pax > room) {
+      overflowPool += (e.pax - room);
+      e.pax = room;
+    }
+    capUsed[e.key] += e.pax;
+  });
+
+  // pass 2: redistribute overflow proportionally to entries with remaining room
+  if (overflowPool > 0.5) {
+    const withRoom = allEntries.filter(e => capacity[e.key] - capUsed[e.key] > 0.5);
+    const totalRoom = withRoom.reduce((s, e) => s + (capacity[e.key] - capUsed[e.key]), 0);
+    if (totalRoom > 0) {
+      withRoom.forEach(e => {
+        const room = capacity[e.key] - capUsed[e.key];
+        const take = Math.min(room, overflowPool * (room / totalRoom));
+        e.pax += take;
+        capUsed[e.key] += take;
+      });
+    }
+    // remaining overflow beyond total system room is simply lost demand (realistic: no purchase)
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 7. FINANCE HELPERS
+// -----------------------------------------------------------------------------
+
+function fleetValue(state) {
+  return state.fleet.filter(f => f.ownership === 'OWNED').reduce((s, f) => {
+    const type = aircraftType(f.typeId);
+    const ageYears = f.ageWeeks / 52;
+    const residual = Math.max(0.15, 1 - ageYears / 25);
+    return s + type.price * residual;
+  }, 0);
+}
+
+function addLedger(state, week, category, amount, note) {
+  state.finance.ledgerRecent.push({ week, category, amount, note });
+  if (state.finance.ledgerRecent.length > 300) {
+    state.finance.ledgerRecent.splice(0, state.finance.ledgerRecent.length - 300);
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 8. WEEKLY TICK
+// -----------------------------------------------------------------------------
+
+function weeklyTick(prevState) {
+  const state = structuredCloneLite(prevState);
+  const rng = seededRandom(state.meta.rngSeed + state.meta.week);
+  state.meta.week += 1;
+  state.meta.weekOfYear = ((state.meta.weekOfYear) % 52) + 1;
+  if (state.meta.weekOfYear === 1) state.meta.year += 1;
+
+  updateMacro(state, rng);
+  processDeliveries(state);
+  processMaintenance(state, rng);
+
+  // ---- collect all markets with at least one offer (player or competitor) ----
+  const marketKeys = new Set();
+  state.routes.filter(r => r.status === 'ACTIVE').forEach(r => {
+    marketKeys.add(r.originId + '|' + r.destId);
+    state.routes.filter(r2 => r2.status === 'ACTIVE' && r2.originId === r.destId).forEach(r2 => {
+      marketKeys.add(r.originId + '|' + r2.destId);
+    });
+  });
+  state.market.competitors.forEach(c => c.routes.forEach(r => marketKeys.add(r.origin + '|' + r.dest)));
+
+  const priorShareCache = state._priorShareCache || {};
+  state._priorShareCache = {};
+
+  const routeRevenue = {}; // routeId -> revenue
+  const routePax = {};
+  const compRouteRevenue = {};
+
+  marketKeys.forEach(key => {
+    const [oId, dId] = key.split('|');
+    const withCache = { ...state, _priorShareCache: priorShareCache };
+    const outcome = computeMarketOutcome(withCache, oId, dId, state.meta.weekOfYear);
+    if (!outcome) return;
+    const totalPaxByOwner = {};
+    SEGMENTS.forEach(seg => {
+      outcome.segments[seg].products.forEach(e => {
+        const rev = e.pax * e.fare;
+        totalPaxByOwner[e.owner] = (totalPaxByOwner[e.owner] || 0) + e.pax;
+        if (e.owner === 'PLAYER') {
+          // attribute to the specific route key stored in product key
+          const routeKey = e.key.replace('P-', '');
+          routeRevenue[routeKey] = (routeRevenue[routeKey] || 0) + rev;
+          routePax[routeKey] = (routePax[routeKey] || 0) + e.pax;
+        } else if (e.owner.startsWith('AI:')) {
+          const cid = e.owner.slice(3);
+          compRouteRevenue[e.key] = (compRouteRevenue[e.key] || 0) + rev;
+        }
+      });
+    });
+    const totalMarketPax = Object.values(totalPaxByOwner).reduce((a, b) => a + b, 0) || 1;
+    state._priorShareCache[key] = {};
+    Object.keys(totalPaxByOwner).forEach(owner => {
+      state._priorShareCache[key][owner] = totalPaxByOwner[owner] / totalMarketPax;
+    });
+  });
+
+  // ---- apply player route economics ----
+  let weekRevenue = 0, weekCosts = 0;
+  const costBreakdown = { fuel: 0, crew: 0, maint: 0, airport: 0, handling: 0, leasing: 0, distribution: 0, insurance: 0, overhead: 0, interest: 0 };
+
+  state.routes.forEach(route => {
+    if (route.status !== 'ACTIVE') return;
+    const type = aircraftType(route.aircraftTypeId);
+    const dist = distanceBetween(route.originId, route.destId);
+    const revenue = routeRevenue[route.id] || 0;
+    const pax = routePax[route.id] || 0;
+    const flights = route.frequencyPerWeek;
+    const fuelLiters = fuelBurnLiters(dist, type) * flights;
+    const fuelCost = fuelLiters * state.market.fuelPrice;
+    const blockH = blockTimeHours(dist, type.cruiseKmh) * flights;
+    const crewCost = type.crew * 95 * blockH;
+    const cond = avgConditionForRoute(state, route);
+    const ageMult = clamp(1.6 - cond / 100, 0.85, 1.6);
+    const maintCost = type.maintPerHour * blockH * ageMult;
+    const sizeFactor = type.seats / 180;
+    const oFee = airport(route.originId).fee, dFee = airport(route.destId).fee;
+    const navFee = dist * 0.34;
+    const airportCost = ((oFee + dFee) / 3 * sizeFactor + navFee) * flights;
+    const handlingCost = pax * 10;
+    const distributionCost = revenue * 0.045;
+
+    weekRevenue += revenue;
+    const routeCost = fuelCost + crewCost + maintCost + airportCost + handlingCost + distributionCost;
+    weekCosts += routeCost;
+    costBreakdown.fuel += fuelCost;
+    costBreakdown.crew += crewCost;
+    costBreakdown.maint += maintCost;
+    costBreakdown.airport += airportCost;
+    costBreakdown.handling += handlingCost;
+    costBreakdown.distribution += distributionCost;
+
+    route.history = route.history || [];
+    const loadFactor = flights > 0 ? pax / (type.seats * flights) : 0;
+    route.history.push({ week: state.meta.week, pax: Math.round(pax), revenue, cost: routeCost, loadFactor });
+    if (route.history.length > 30) route.history.splice(0, route.history.length - 30);
+
+    if (route.fareStrategy === 'YIELD_OPTIMIZED') {
+      adaptYield(route, loadFactor);
+    }
+  });
+
+  // leasing + insurance + overhead (fleet-wide, not per-route)
+  state.fleet.forEach(f => {
+    if (f.ownership === 'LEASED') {
+      const type = aircraftType(f.typeId);
+      costBreakdown.leasing += type.leaseWeekly;
+      weekCosts += type.leaseWeekly;
+    }
+  });
+  const fValue = fleetValue(state);
+  const insurance = fValue * 0.00013 + state.fleet.length * 150;
+  const overhead = 9000 + state.fleet.length * 900 + state.routes.filter(r => r.status === 'ACTIVE').length * 300;
+  costBreakdown.insurance = insurance;
+  costBreakdown.overhead = overhead;
+  weekCosts += insurance + overhead;
+
+  // loans
+  let interestPaid = 0, principalPaid = 0;
+  state.finance.loans = state.finance.loans.filter(loan => {
+    const interest = loan.principal * loan.weeklyRate;
+    const payment = Math.min(loan.weeklyPayment, loan.principal + interest);
+    const principal = payment - interest;
+    loan.principal -= principal;
+    interestPaid += interest; principalPaid += principal;
+    loan.remainingWeeks -= 1;
+    return loan.principal > 1 && loan.remainingWeeks > 0;
+  });
+  costBreakdown.interest = interestPaid;
+  weekCosts += interestPaid;
+
+  state.company.cash += weekRevenue - weekCosts - principalPaid;
+
+  // reputation / OTP drift
+  updateReputationAndOtp(state, rng);
+
+  // finance history
+  const netIncome = weekRevenue - weekCosts;
+  state.finance.plHistory.push({ week: state.meta.week, revenue: weekRevenue, costs: weekCosts, netIncome, breakdown: costBreakdown });
+  if (state.finance.plHistory.length > 104) state.finance.plHistory.splice(0, state.finance.plHistory.length - 104);
+  state.finance.cashHistory.push({ week: state.meta.week, cash: state.company.cash });
+  if (state.finance.cashHistory.length > 208) state.finance.cashHistory.splice(0, state.finance.cashHistory.length - 208);
+
+  addLedger(state, state.meta.week, 'REVENUE', weekRevenue, 'Recettes réseau');
+  addLedger(state, state.meta.week, 'COSTS', -weekCosts, 'Coûts opérationnels');
+
+  // aging
+  state.fleet.forEach(f => { f.ageWeeks += 1; });
+
+  // competitor AI
+  runCompetitorAI(state, rng, compRouteRevenue);
+
+  // random events
+  maybeTriggerEvent(state, rng);
+
+  // bankruptcy check
+  checkBankruptcy(state);
+
+  return state;
+}
+
+function avgConditionForRoute(state, route) {
+  const assigned = state.fleet.filter(f => f.assignedRouteId === route.id);
+  if (!assigned.length) return 85;
+  return assigned.reduce((s, f) => s + f.condition, 0) / assigned.length;
+}
+
+function adaptYield(route, loadFactor) {
+  route._yieldMult = route._yieldMult || 1.0;
+  route._yieldAlloc = route._yieldAlloc || { ...FARE_STRATEGIES.YIELD_OPTIMIZED.alloc };
+  if (loadFactor > 0.88) {
+    route._yieldMult = clamp(route._yieldMult + 0.015, 0.9, 1.35);
+  } else if (loadFactor < 0.55) {
+    route._yieldMult = clamp(route._yieldMult - 0.015, 0.75, 1.1);
+  }
+  FARE_STRATEGIES.YIELD_OPTIMIZED.refMult = route._yieldMult; // simplified single global adaptive dial
+}
+
+function updateMacro(state, rng) {
+  const m = state.market.macro;
+  m.fuelTrend += (rng() - 0.5) * 0.02;
+  m.fuelTrend = clamp(m.fuelTrend, -0.15, 0.15);
+  state.market.fuelPrice = clamp(state.market.fuelPrice * (1 + m.fuelTrend * 0.1 + (rng() - 0.5) * 0.015), 0.45, 1.9);
+  m.demandIndex = clamp(m.demandIndex + (rng() - 0.5) * 0.01, 0.75, 1.25);
+}
+
+function processDeliveries(state) {
+  state.orders = state.orders.filter(o => {
+    o.weeksLeft -= 1;
+    if (o.weeksLeft <= 0) {
+      state.fleet.push({
+        id: 'AC' + (state.company.nextAircraftSerial++), typeId: o.typeId, ownership: o.ownership,
+        ageWeeks: 0, cycles: 0, flightHours: 0, condition: 100, status: 'ACTIVE', assignedRouteId: null,
+      });
+      state.log.push({ week: state.meta.week, type: 'DELIVERY', text: `Livraison d'un ${aircraftType(o.typeId).name}.` });
+      return false;
+    }
+    return true;
+  });
+}
+
+function processMaintenance(state, rng) {
+  state.fleet.forEach(f => {
+    if (f.status === 'MAINTENANCE') {
+      f.maintWeeksLeft -= 1;
+      if (f.maintWeeksLeft <= 0) { f.status = 'ACTIVE'; f.condition = clamp(f.condition + 25, 0, 100); }
+      return;
+    }
+    f.condition = clamp(f.condition - 0.35, 10, 100);
+    const failRisk = 0.004 * (1 + (100 - f.condition) / 60);
+    if (rng() < failRisk) {
+      f.status = 'MAINTENANCE';
+      f.maintWeeksLeft = 1 + Math.floor(rng() * 2);
+      const type = aircraftType(f.typeId);
+      const cost = type.maintPerHour * 40;
+      state.company.cash -= cost;
+      addLedger(state, state.meta.week, 'MAINT_UNSCHEDULED', -cost, 'Maintenance non programmée');
+      state.log.push({ week: state.meta.week, type: 'MAINT', text: `Immobilisation imprévue d'un appareil pour maintenance.` });
+    }
+  });
+}
+
+function updateReputationAndOtp(state, rng) {
+  const fleetCondition = state.fleet.length ? state.fleet.reduce((s, f) => s + f.condition, 0) / state.fleet.length : 85;
+  const targetOtp = clamp(78 + fleetCondition / 6 - state.routes.filter(r => r.status === 'ACTIVE').length * 0.25 + (rng() - 0.5) * 6, 45, 98);
+  state.company.otp = state.company.otp + (targetOtp - state.company.otp) * 0.3;
+  const targetRep = clamp(40 + state.company.otp * 0.5, 0, 100);
+  state.company.reputation = clamp(state.company.reputation + (targetRep - state.company.reputation) * 0.06, 0, 100);
+}
+
+function runCompetitorAI(state, rng, compRouteRevenue) {
+  state.market.competitors.forEach(c => {
+    c.routes.forEach(r => {
+      const rev = compRouteRevenue['P-' + r.id] || 0;
+      r.history.push(rev);
+      if (r.history.length > 8) r.history.shift();
+      const type = aircraftType(r.aircraftTypeId);
+      const cost = fuelBurnLiters(distanceBetween(r.origin, r.dest), type) * r.freq * state.market.fuelPrice * 1.3;
+      const margin = rev - cost;
+      if (margin < -cost * 0.3 && rng() < 0.25) {
+        r.fareStrategy = r.fareStrategy === 'PREMIUM' ? 'COMPETITIVE' : r.fareStrategy === 'COMPETITIVE' ? 'VALUE' : r.fareStrategy;
+      } else if (margin > cost * 0.5 && rng() < 0.15) {
+        r.fareStrategy = r.fareStrategy === 'VALUE' ? 'COMPETITIVE' : r.fareStrategy === 'COMPETITIVE' ? 'PREMIUM' : r.fareStrategy;
+      }
+    });
+    c.cash += (rng() - 0.42) * 1.5e6; // coarse abstracted cashflow drift for AI companies
+    if (rng() < 0.01 && c.routes.length < 14 && c.cash > 60e6) {
+      const candidates = AIRPORTS.filter(a => a.id !== c.hub && !c.routes.find(r => r.dest === a.id));
+      if (candidates.length) {
+        const pick = candidates[Math.floor(rng() * candidates.length)];
+        const d = distanceBetween(c.hub, pick.id);
+        const type = pickAircraftForDistance(d, c.strategy);
+        c.routes.push({
+          id: 'CR' + c.id + Date.now() % 100000, origin: c.hub, dest: pick.id, aircraftTypeId: type.id,
+          freq: 3, fareStrategy: 'COMPETITIVE', history: [],
+        });
+      }
+    }
+  });
+}
+
+function maybeTriggerEvent(state, rng) {
+  if (rng() < 0.05) {
+    const kinds = ['FUEL_SPIKE', 'TOURISM_BOOM', 'RECESSION_LOCAL', 'STRIKE'];
+    const kind = kinds[Math.floor(rng() * kinds.length)];
+    if (kind === 'FUEL_SPIKE') {
+      state.market.fuelPrice = clamp(state.market.fuelPrice * 1.18, 0.45, 2.2);
+      state.log.push({ week: state.meta.week, type: 'EVENT', text: `Le prix du carburant augmente sensiblement sur le marché mondial.` });
+    } else if (kind === 'TOURISM_BOOM') {
+      state.market.macro.demandIndex = clamp(state.market.macro.demandIndex * 1.06, 0.75, 1.3);
+      state.log.push({ week: state.meta.week, type: 'EVENT', text: `Une hausse de la demande touristique est constatée sur plusieurs marchés.` });
+    } else if (kind === 'RECESSION_LOCAL') {
+      state.market.macro.demandIndex = clamp(state.market.macro.demandIndex * 0.94, 0.75, 1.3);
+      state.log.push({ week: state.meta.week, type: 'EVENT', text: `Un ralentissement économique affecte la demande de voyages.` });
+    } else if (kind === 'STRIKE') {
+      state.company.otp = clamp(state.company.otp - 8, 30, 100);
+      state.log.push({ week: state.meta.week, type: 'EVENT', text: `Des perturbations opérationnelles affectent la ponctualité du secteur.` });
+    }
+    if (state.log.length > 120) state.log.splice(0, state.log.length - 120);
+  }
+}
+
+function checkBankruptcy(state) {
+  if (state.company.cash < -8e6) {
+    state.company._negativeStreak = (state.company._negativeStreak || 0) + 1;
+  } else {
+    state.company._negativeStreak = 0;
+  }
+  if (state.company._negativeStreak >= 6) {
+    state.company.bankrupt = true;
+    state.log.push({ week: state.meta.week, type: 'BANKRUPTCY', text: `Trésorerie négative prolongée : la compagnie est en cessation de paiements.` });
+  }
+}
+
+function structuredCloneLite(obj) {
+  return JSON.parse(JSON.stringify(obj));
+}
+
+// -----------------------------------------------------------------------------
+// 9. PLAYER ACTIONS
+// -----------------------------------------------------------------------------
+
+function actionOpenRoute(state, { originId, destId, aircraftTypeId, frequencyPerWeek, fareStrategy, departMinute }) {
+  const s = structuredCloneLite(state);
+  const id = 'R' + (s.company.nextRouteSerial++);
+  const schedule = Array.from({ length: frequencyPerWeek }, (_, i) => ({ dayOfWeek: i % 7, minute: departMinute }));
+  s.routes.push({ id, originId, destId, aircraftTypeId, frequencyPerWeek, fareStrategy: fareStrategy || 'COMPETITIVE', schedule, status: 'ACTIVE', history: [] });
+  return s;
+}
+
+function actionSetFareStrategy(state, routeId, fareStrategy) {
+  const s = structuredCloneLite(state);
+  const r = s.routes.find(x => x.id === routeId);
+  if (r) r.fareStrategy = fareStrategy;
+  return s;
+}
+
+function actionSetFrequency(state, routeId, frequencyPerWeek) {
+  const s = structuredCloneLite(state);
+  const r = s.routes.find(x => x.id === routeId);
+  if (r) {
+    r.frequencyPerWeek = frequencyPerWeek;
+    r.schedule = Array.from({ length: frequencyPerWeek }, (_, i) => ({ dayOfWeek: i % 7, minute: r.schedule[0]?.minute ?? 480 }));
+  }
+  return s;
+}
+
+function actionSuspendRoute(state, routeId) {
+  const s = structuredCloneLite(state);
+  const r = s.routes.find(x => x.id === routeId);
+  if (r) r.status = r.status === 'ACTIVE' ? 'SUSPENDED' : 'ACTIVE';
+  return s;
+}
+
+function actionBuyAircraft(state, typeId, ownership) {
+  const s = structuredCloneLite(state);
+  const type = aircraftType(typeId);
+  const leadWeeks = ownership === 'LEASED' ? 2 : 5;
+  if (ownership === 'OWNED') {
+    if (s.company.cash < type.price * 0.2) return { state: s, error: 'Trésorerie insuffisante pour un apport minimal.' };
+    s.company.cash -= type.price * 0.2;
+    const principal = type.price * 0.8;
+    const weeklyRate = 0.00125; // ~6.7% annualized
+    const termWeeks = 520; // 10-year amortization
+    const annuityFactor = weeklyRate / (1 - Math.pow(1 + weeklyRate, -termWeeks));
+    const loan = {
+      id: 'L' + Date.now() % 100000, principal, weeklyRate,
+      remainingWeeks: termWeeks, weeklyPayment: principal * annuityFactor,
+    };
+    s.finance.loans.push(loan);
+  }
+  s.orders.push({ typeId, ownership, weeksLeft: leadWeeks });
+  return { state: s, error: null };
+}
+
+function actionAssignAircraft(state, aircraftId, routeId) {
+  const s = structuredCloneLite(state);
+  const f = s.fleet.find(x => x.id === aircraftId);
+  if (f) f.assignedRouteId = routeId;
+  return s;
+}
+
+// =============================================================================
+// UI LAYER — React application shell (appended after the engine code)
+// =============================================================================
+
+const SAVE_KEY = 'airline-sim-save-v1';
+
+const TIME_SLOTS = [
+  { label: 'Tôt le matin (06:00)', minute: 360 },
+  { label: 'Matin (08:30)', minute: 510 },
+  { label: 'Midi (12:00)', minute: 720 },
+  { label: 'Après-midi (15:00)', minute: 900 },
+  { label: 'Soirée (18:30)', minute: 1110 },
+  { label: 'Nuit (21:30)', minute: 1290 },
+];
+
+const FARE_LABELS = {
+  DISCOUNT: 'Discount',
+  VALUE: 'Value',
+  COMPETITIVE: 'Compétitif',
+  PREMIUM: 'Premium',
+  YIELD_OPTIMIZED: 'Yield optimisé',
+};
+
+const REGION_LABELS = { EU: 'Europe', NA: 'Amérique du Nord', SA: 'Amérique du Sud', ME: 'Moyen-Orient', AS: 'Asie', AF: 'Afrique', OC: 'Océanie' };
+
+function fmtMoney(n) {
+  if (n === null || n === undefined || !isFinite(n)) return '—';
+  const sign = n < 0 ? '-' : '';
+  const abs = Math.abs(n);
+  if (abs >= 1e9) return sign + '$' + (abs / 1e9).toFixed(2) + ' Md';
+  if (abs >= 1e6) return sign + '$' + (abs / 1e6).toFixed(2) + ' M';
+  if (abs >= 1e3) return sign + '$' + (abs / 1e3).toFixed(0) + ' k';
+  return sign + '$' + Math.round(abs);
+}
+function fmtNum(n) { return isFinite(n) ? Math.round(n).toLocaleString('fr-FR') : '—'; }
+function fmtPct(n) { return isFinite(n) ? Math.round(n) + ' %' : '—'; }
+function minuteToHHMM(m) { const h = Math.floor(m / 60), mm = m % 60; return String(h).padStart(2, '0') + ':' + String(mm).padStart(2, '0'); }
+
+// -----------------------------------------------------------------------------
+// Persistence helpers
+// -----------------------------------------------------------------------------
+async function loadSave() {
+  try {
+    const res = await window.storage.get(SAVE_KEY, false);
+    if (!res) return null;
+    return JSON.parse(res.value);
+  } catch (e) {
+    return null;
+  }
+}
+async function writeSave(state) {
+  try {
+    await window.storage.set(SAVE_KEY, JSON.stringify(state), false);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+async function clearSave() {
+  try { await window.storage.delete(SAVE_KEY, false); } catch (e) { /* noop */ }
+}
+
+// -----------------------------------------------------------------------------
+// Small building blocks
+// -----------------------------------------------------------------------------
+function Panel({ title, right, children, className }) {
+  return (
+    <div className={'panel ' + (className || '')}>
+      {(title || right) && (
+        <div className="panel-head">
+          {title && <h3>{title}</h3>}
+          {right}
+        </div>
+      )}
+      <div className="panel-body">{children}</div>
+    </div>
+  );
+}
+
+function KpiCard({ icon: Icon, label, value, tone, sub }) {
+  return (
+    <div className="kpi-card">
+      <div className={'kpi-icon tone-' + (tone || 'neutral')}><Icon size={18} /></div>
+      <div className="kpi-text">
+        <div className="kpi-label">{label}</div>
+        <div className="kpi-value">{value}</div>
+        {sub && <div className="kpi-sub">{sub}</div>}
+      </div>
+    </div>
+  );
+}
+
+function ConditionBar({ value }) {
+  const tone = value > 70 ? 'good' : value > 40 ? 'mid' : 'bad';
+  return (
+    <div className="cond-bar"><div className={'cond-fill tone-' + tone} style={{ width: clamp01(value) + '%' }} /></div>
+  );
+}
+function clamp01(v) { return Math.max(0, Math.min(100, v)); }
+
+function Toast({ items }) {
+  if (!items.length) return null;
+  return (
+    <div className="toast-stack">
+      {items.map(t => <div key={t.id} className={'toast tone-' + t.tone}>{t.text}</div>)}
+    </div>
+  );
+}
+
+// -----------------------------------------------------------------------------
+// Onboarding
+// -----------------------------------------------------------------------------
+function Onboarding({ onCreate }) {
+  const [name, setName] = useState('');
+  const [base, setBase] = useState('CDG');
+  const sorted = [...AIRPORTS].sort((a, b) => b.size - a.size);
+  return (
+    <div className="onboarding">
+      <div className="onboarding-card">
+        <div className="onboarding-hero">
+          <Plane size={30} />
+          <div>
+            <div className="onboarding-eyebrow">AERODESK · Simulation de gestion aérienne</div>
+            <h1>Fondez votre compagnie</h1>
+          </div>
+        </div>
+        <p className="onboarding-copy">
+          Choisissez un nom et une base de départ. Vous démarrez avec une trésorerie modeste —
+          le reste (réseau, flotte, tarification) se construit vol après vol.
+        </p>
+        <label className="field">
+          <span>Nom de la compagnie</span>
+          <input value={name} onChange={e => setName(e.target.value)} placeholder="ex. Meridian Wings" maxLength={40} />
+        </label>
+        <label className="field">
+          <span>Base de départ</span>
+          <select value={base} onChange={e => setBase(e.target.value)}>
+            {sorted.map(a => <option key={a.id} value={a.id}>{a.city} ({a.id}) — {REGION_LABELS[a.region]}</option>)}
+          </select>
+        </label>
+        <button className="btn btn-primary btn-lg" disabled={!name.trim()} onClick={() => onCreate(name.trim() || 'Ma Compagnie', base)}>
+          Fonder la compagnie <ArrowRight size={16} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// -----------------------------------------------------------------------------
+// Sidebar / shell
+// -----------------------------------------------------------------------------
+const NAV_ITEMS = [
+  { id: 'DASHBOARD', label: 'Tableau de bord', icon: LayoutDashboard },
+  { id: 'NETWORK', label: 'Réseau', icon: Network },
+  { id: 'FLEET', label: 'Flotte', icon: Plane },
+  { id: 'FINANCE', label: 'Finances', icon: Landmark },
+  { id: 'MARKET', label: 'Marché', icon: Globe2 },
+  { id: 'JOURNAL', label: 'Journal', icon: Newspaper },
+  { id: 'HELP', label: 'Aide', icon: HelpCircle },
+];
+
+function Sidebar({ screen, setScreen, company }) {
+  return (
+    <div className="sidebar">
+      <div className="sidebar-brand">
+        <Plane size={20} />
+        <div className="sidebar-brand-text">
+          <div className="brand-name">{company.name}</div>
+          <div className="brand-sub">{airport(company.homeBase).city} · {company.homeBase}</div>
+        </div>
+      </div>
+      <nav>
+        {NAV_ITEMS.map(item => (
+          <button key={item.id} className={'nav-item' + (screen === item.id ? ' active' : '')} onClick={() => setScreen(item.id)}>
+            <item.icon size={17} /> <span>{item.label}</span>
+          </button>
+        ))}
+      </nav>
+    </div>
+  );
+}
+
+function TopBar({ state, onAdvance, advancing, saveLabel }) {
+  const netLast = state.finance.plHistory.length ? state.finance.plHistory[state.finance.plHistory.length - 1].netIncome : 0;
+  return (
+    <div className="topbar">
+      <div className="topbar-stat">
+        <div className="topbar-label">Semaine</div>
+        <div className="topbar-value">S{state.meta.week} · An {state.meta.year}</div>
+      </div>
+      <div className="topbar-stat">
+        <div className="topbar-label">Trésorerie</div>
+        <div className={'topbar-value ' + (state.company.cash < 0 ? 'neg' : '')}>{fmtMoney(state.company.cash)}</div>
+      </div>
+      <div className="topbar-stat">
+        <div className="topbar-label">Résultat (dern. semaine)</div>
+        <div className={'topbar-value ' + (netLast < 0 ? 'neg' : 'pos')}>{fmtMoney(netLast)}</div>
+      </div>
+      <div className="topbar-stat">
+        <div className="topbar-label">Réputation</div>
+        <div className="topbar-value">{Math.round(state.company.reputation)}/100</div>
+      </div>
+      <div className="topbar-spacer" />
+      <div className="save-indicator">{saveLabel}</div>
+      <button className="btn btn-primary" disabled={advancing || state.company.bankrupt} onClick={onAdvance}>
+        {advancing ? 'Calcul…' : 'Avancer d\u2019une semaine'} <ChevronRight size={16} />
+      </button>
+    </div>
+  );
+}
+
+// -----------------------------------------------------------------------------
+// Dashboard
+// -----------------------------------------------------------------------------
+function Dashboard({ state }) {
+  const pl = state.finance.plHistory.slice(-16).map(p => ({ week: 'S' + p.week, Revenus: Math.round(p.revenue), Coûts: Math.round(p.costs), Résultat: Math.round(p.netIncome) }));
+  const cash = state.finance.cashHistory.slice(-26).map(c => ({ week: 'S' + c.week, Trésorerie: Math.round(c.cash) }));
+  const activeRoutes = state.routes.filter(r => r.status === 'ACTIVE');
+  const alerts = buildAlerts(state);
+  const lastLog = state.log.slice(-6).reverse();
+
+  return (
+    <div className="screen">
+      <div className="kpi-row">
+        <KpiCard icon={Wallet} label="Trésorerie" value={fmtMoney(state.company.cash)} tone={state.company.cash < 0 ? 'bad' : 'good'} />
+        <KpiCard icon={Plane} label="Flotte" value={state.fleet.length + ' appareils'} sub={state.orders.length ? state.orders.length + ' en commande' : null} />
+        <KpiCard icon={Network} label="Lignes actives" value={activeRoutes.length} />
+        <KpiCard icon={Gauge} label="Ponctualité" value={fmtPct(state.company.otp)} tone={state.company.otp > 80 ? 'good' : 'mid'} />
+        <KpiCard icon={Users} label="Réputation" value={Math.round(state.company.reputation) + '/100'} />
+      </div>
+
+      <div className="grid-2">
+        <Panel title="Résultat hebdomadaire (16 dernières semaines)">
+          <ResponsiveContainer width="100%" height={220}>
+            <BarChart data={pl}>
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+              <XAxis dataKey="week" stroke="var(--text-dim)" fontSize={11} />
+              <YAxis stroke="var(--text-dim)" fontSize={11} tickFormatter={v => fmtMoney(v)} width={64} />
+              <Tooltip contentStyle={tooltipStyle} formatter={v => fmtMoney(v)} />
+              <Bar dataKey="Revenus" fill="#4FC1E9" radius={[2, 2, 0, 0]} />
+              <Bar dataKey="Coûts" fill="#E1595A" radius={[2, 2, 0, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+        </Panel>
+        <Panel title="Trésorerie (26 dernières semaines)">
+          <ResponsiveContainer width="100%" height={220}>
+            <AreaChart data={cash}>
+              <defs>
+                <linearGradient id="cashGrad" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="#E8A33D" stopOpacity={0.5} />
+                  <stop offset="100%" stopColor="#E8A33D" stopOpacity={0} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+              <XAxis dataKey="week" stroke="var(--text-dim)" fontSize={11} />
+              <YAxis stroke="var(--text-dim)" fontSize={11} tickFormatter={v => fmtMoney(v)} width={64} />
+              <Tooltip contentStyle={tooltipStyle} formatter={v => fmtMoney(v)} />
+              <Area type="monotone" dataKey="Trésorerie" stroke="#E8A33D" fill="url(#cashGrad)" strokeWidth={2} />
+            </AreaChart>
+          </ResponsiveContainer>
+        </Panel>
+      </div>
+
+      <div className="grid-2">
+        <Panel title={'Alertes' + (alerts.length ? ' (' + alerts.length + ')' : '')}>
+          {alerts.length === 0 && <div className="empty-hint">Aucune alerte active.</div>}
+          {alerts.map((a, i) => (
+            <div key={i} className={'alert-row tone-' + a.tone}>
+              <AlertTriangle size={14} /> <span>{a.text}</span>
+            </div>
+          ))}
+        </Panel>
+        <Panel title="Derniers événements">
+          {lastLog.length === 0 && <div className="empty-hint">Rien à signaler.</div>}
+          {lastLog.map((l, i) => (
+            <div key={i} className="log-row">
+              <span className="log-week">S{l.week}</span>
+              <span>{l.text}</span>
+            </div>
+          ))}
+        </Panel>
+      </div>
+    </div>
+  );
+}
+
+function buildAlerts(state) {
+  const alerts = [];
+  if (state.company.cash < 0) alerts.push({ tone: 'bad', text: 'Trésorerie négative — réduisez les coûts ou augmentez les recettes rapidement.' });
+  const maint = state.fleet.filter(f => f.status === 'MAINTENANCE');
+  if (maint.length) alerts.push({ tone: 'mid', text: maint.length + ' appareil(s) immobilisé(s) en maintenance.' });
+  const unassigned = state.fleet.filter(f => f.status === 'ACTIVE' && !f.assignedRouteId);
+  if (unassigned.length) alerts.push({ tone: 'mid', text: unassigned.length + ' appareil(s) disponible(s) ne sont affectés à aucune ligne.' });
+  state.routes.filter(r => r.status === 'ACTIVE').forEach(r => {
+    const h = r.history || [];
+    if (h.length >= 3) {
+      const recent = h.slice(-3);
+      const avgLf = recent.reduce((s, x) => s + x.loadFactor, 0) / recent.length;
+      if (avgLf < 0.35) alerts.push({ tone: 'mid', text: `Ligne ${r.originId}–${r.destId} : coefficient de remplissage faible (${Math.round(avgLf * 100)} %).` });
+      const avgProfit = recent.reduce((s, x) => s + (x.revenue - x.cost), 0) / recent.length;
+      if (avgProfit < 0) alerts.push({ tone: 'bad', text: `Ligne ${r.originId}–${r.destId} : déficitaire sur les dernières semaines.` });
+    }
+  });
+  if (state.company.otp < 70) alerts.push({ tone: 'mid', text: 'Ponctualité en dessous de 70 % — cela pèse sur votre réputation.' });
+  return alerts.slice(0, 6);
+}
+
+const tooltipStyle = { background: '#1C2637', border: '1px solid #2A3448', borderRadius: 6, color: '#E7ECF5', fontSize: 12 };
+
+// -----------------------------------------------------------------------------
+// Network screen
+// -----------------------------------------------------------------------------
+function NetworkScreen({ state, dispatch }) {
+  const [expanded, setExpanded] = useState(null);
+  const [showNew, setShowNew] = useState(false);
+  const availableAircraft = state.fleet.filter(f => f.status === 'ACTIVE' && !f.assignedRouteId);
+
+  return (
+    <div className="screen">
+      <Panel title="Vos lignes" right={
+        <button className="btn btn-sm btn-primary" onClick={() => setShowNew(s => !s)}>
+          <Plus size={14} /> Nouvelle ligne
+        </button>
+      }>
+        {state.routes.length === 0 && <div className="empty-hint">Aucune ligne pour l'instant. Ouvrez-en une pour démarrer l'exploitation.</div>}
+        <table className="data-table">
+          <thead>
+            <tr>
+              <th>Ligne</th><th>Distance</th><th>Appareil</th><th>Fréq./sem.</th><th>Stratégie tarifaire</th>
+              <th>Dern. remplissage</th><th>Dern. résultat</th><th>Statut</th><th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {state.routes.map(r => {
+              const type = aircraftType(r.aircraftTypeId);
+              const dist = distanceBetween(r.originId, r.destId);
+              const last = r.history && r.history.length ? r.history[r.history.length - 1] : null;
+              return (
+                <React.Fragment key={r.id}>
+                  <tr className={r.status !== 'ACTIVE' ? 'row-dim' : ''} onClick={() => setExpanded(expanded === r.id ? null : r.id)}>
+                    <td className="mono">{r.originId} → {r.destId}</td>
+                    <td className="mono">{fmtNum(dist)} km</td>
+                    <td>{type.name}</td>
+                    <td>
+                      <select className="inline-select" value={r.frequencyPerWeek} onClick={e => e.stopPropagation()}
+                        onChange={e => dispatch(s => actionSetFrequency(s, r.id, parseInt(e.target.value, 10)))}>
+                        {[1, 2, 3, 5, 7, 10, 14, 21].map(f => <option key={f} value={f}>{f}</option>)}
+                      </select>
+                    </td>
+                    <td>
+                      <select className="inline-select" value={r.fareStrategy} onClick={e => e.stopPropagation()}
+                        onChange={e => dispatch(s => actionSetFareStrategy(s, r.id, e.target.value))}>
+                        {Object.keys(FARE_LABELS).map(k => <option key={k} value={k}>{FARE_LABELS[k]}</option>)}
+                      </select>
+                    </td>
+                    <td className="mono">{last ? fmtPct(last.loadFactor * 100) : '—'}</td>
+                    <td className={'mono ' + (last && (last.revenue - last.cost) < 0 ? 'neg' : last ? 'pos' : '')}>{last ? fmtMoney(last.revenue - last.cost) : '—'}</td>
+                    <td><span className={'badge ' + (r.status === 'ACTIVE' ? 'badge-good' : 'badge-mid')}>{r.status === 'ACTIVE' ? 'Active' : 'Suspendue'}</span></td>
+                    <td>
+                      <button className="btn btn-xs" onClick={e => { e.stopPropagation(); dispatch(s => actionSuspendRoute(s, r.id)); }}>
+                        {r.status === 'ACTIVE' ? 'Suspendre' : 'Reprendre'}
+                      </button>
+                    </td>
+                  </tr>
+                  {expanded === r.id && (
+                    <tr className="row-detail">
+                      <td colSpan={9}>
+                        <RouteTrend route={r} />
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
+              );
+            })}
+          </tbody>
+        </table>
+      </Panel>
+
+      {showNew && <NewRouteForm state={state} dispatch={dispatch} availableAircraft={availableAircraft} onDone={() => setShowNew(false)} />}
+    </div>
+  );
+}
+
+function RouteTrend({ route }) {
+  const data = (route.history || []).map(h => ({ week: 'S' + h.week, Remplissage: Math.round(h.loadFactor * 100), Résultat: Math.round(h.revenue - h.cost) }));
+  if (!data.length) return <div className="empty-hint">Pas encore de données de vol.</div>;
+  return (
+    <ResponsiveContainer width="100%" height={160}>
+      <LineChart data={data}>
+        <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+        <XAxis dataKey="week" stroke="var(--text-dim)" fontSize={11} />
+        <YAxis yAxisId="left" stroke="var(--text-dim)" fontSize={11} />
+        <YAxis yAxisId="right" orientation="right" stroke="var(--text-dim)" fontSize={11} tickFormatter={v => fmtMoney(v)} />
+        <Tooltip contentStyle={tooltipStyle} />
+        <Line yAxisId="left" type="monotone" dataKey="Remplissage" stroke="#4FC1E9" strokeWidth={2} dot={false} />
+        <Line yAxisId="right" type="monotone" dataKey="Résultat" stroke="#E8A33D" strokeWidth={2} dot={false} />
+      </LineChart>
+    </ResponsiveContainer>
+  );
+}
+
+function NewRouteForm({ state, dispatch, availableAircraft, onDone }) {
+  const [aircraftId, setAircraftId] = useState(availableAircraft[0]?.id || '');
+  const [originId, setOriginId] = useState(state.company.homeBase);
+  const [destId, setDestId] = useState('');
+  const [freq, setFreq] = useState(7);
+  const [fareStrategy, setFareStrategy] = useState('COMPETITIVE');
+  const [slot, setSlot] = useState(TIME_SLOTS[1].minute);
+
+  const acObj = availableAircraft.find(a => a.id === aircraftId);
+  const type = acObj ? aircraftType(acObj.typeId) : null;
+  const reachable = type ? AIRPORTS.filter(a => a.id !== originId && distanceBetween(originId, a.id) <= type.rangeKm) : [];
+
+  if (!availableAircraft.length) {
+    return <Panel title="Nouvelle ligne"><div className="empty-hint">Aucun appareil disponible. Achetez ou libérez un appareil dans l'onglet Flotte.</div></Panel>;
+  }
+
+  return (
+    <Panel title="Nouvelle ligne" right={<button className="btn btn-xs" onClick={onDone}><X size={13} /></button>}>
+      <div className="form-grid">
+        <label className="field">
+          <span>Appareil</span>
+          <select value={aircraftId} onChange={e => setAircraftId(e.target.value)}>
+            {availableAircraft.map(a => {
+              const t = aircraftType(a.typeId);
+              return <option key={a.id} value={a.id}>{a.id} — {t.name} ({t.seats} sièges)</option>;
+            })}
+          </select>
+        </label>
+        <label className="field">
+          <span>Origine</span>
+          <select value={originId} onChange={e => setOriginId(e.target.value)}>
+            {AIRPORTS.map(a => <option key={a.id} value={a.id}>{a.city} ({a.id})</option>)}
+          </select>
+        </label>
+        <label className="field">
+          <span>Destination</span>
+          <select value={destId} onChange={e => setDestId(e.target.value)}>
+            <option value="">— choisir —</option>
+            {reachable.map(a => <option key={a.id} value={a.id}>{a.city} ({a.id}) · {fmtNum(distanceBetween(originId, a.id))} km</option>)}
+          </select>
+        </label>
+        <label className="field">
+          <span>Fréquence / semaine</span>
+          <select value={freq} onChange={e => setFreq(parseInt(e.target.value, 10))}>
+            {[1, 2, 3, 5, 7, 10, 14, 21].map(f => <option key={f} value={f}>{f}</option>)}
+          </select>
+        </label>
+        <label className="field">
+          <span>Créneau horaire</span>
+          <select value={slot} onChange={e => setSlot(parseInt(e.target.value, 10))}>
+            {TIME_SLOTS.map(s => <option key={s.minute} value={s.minute}>{s.label}</option>)}
+          </select>
+        </label>
+        <label className="field">
+          <span>Stratégie tarifaire</span>
+          <select value={fareStrategy} onChange={e => setFareStrategy(e.target.value)}>
+            {Object.keys(FARE_LABELS).map(k => <option key={k} value={k}>{FARE_LABELS[k]}</option>)}
+          </select>
+        </label>
+      </div>
+      {type && !reachable.length && <div className="empty-hint">Aucune destination à portée de cet appareil depuis cette origine.</div>}
+      <button className="btn btn-primary" disabled={!destId} onClick={() => {
+        dispatch(s => {
+          let s2 = actionOpenRoute(s, { originId, destId, aircraftTypeId: type.id, frequencyPerWeek: freq, fareStrategy, departMinute: slot });
+          const newRoute = s2.routes[s2.routes.length - 1];
+          s2 = actionAssignAircraft(s2, aircraftId, newRoute.id);
+          return s2;
+        });
+        onDone();
+      }}>Ouvrir la ligne</button>
+    </Panel>
+  );
+}
+
+// -----------------------------------------------------------------------------
+// Fleet screen
+// -----------------------------------------------------------------------------
+function FleetScreen({ state, dispatch, notify }) {
+  const [showBuy, setShowBuy] = useState(false);
+  return (
+    <div className="screen">
+      <Panel title="Votre flotte" right={<button className="btn btn-sm btn-primary" onClick={() => setShowBuy(s => !s)}><Plus size={14} /> Acquérir un appareil</button>}>
+        {state.fleet.length === 0 && <div className="empty-hint">Aucun appareil. Achetez ou louez votre premier avion.</div>}
+        <table className="data-table">
+          <thead><tr><th>ID</th><th>Type</th><th>Propriété</th><th>Âge</th><th>État</th><th>Statut</th><th>Ligne affectée</th></tr></thead>
+          <tbody>
+            {state.fleet.map(f => {
+              const t = aircraftType(f.typeId);
+              const route = state.routes.find(r => r.id === f.assignedRouteId);
+              return (
+                <tr key={f.id}>
+                  <td className="mono">{f.id}</td>
+                  <td>{t.name}</td>
+                  <td>{f.ownership === 'OWNED' ? 'Propriété' : 'Location'}</td>
+                  <td className="mono">{(f.ageWeeks / 52).toFixed(1)} ans</td>
+                  <td style={{ minWidth: 110 }}><ConditionBar value={f.condition} /></td>
+                  <td><span className={'badge ' + (f.status === 'ACTIVE' ? 'badge-good' : 'badge-mid')}>{f.status === 'ACTIVE' ? 'En service' : 'Maintenance'}</span></td>
+                  <td>{route ? `${route.originId} → ${route.destId}` : <span className="text-dim">Non affecté</span>}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </Panel>
+
+      {state.orders.length > 0 && (
+        <Panel title="Commandes en cours">
+          <table className="data-table">
+            <thead><tr><th>Type</th><th>Propriété</th><th>Livraison estimée</th></tr></thead>
+            <tbody>
+              {state.orders.map((o, i) => (
+                <tr key={i}><td>{aircraftType(o.typeId).name}</td><td>{o.ownership === 'OWNED' ? 'Propriété' : 'Location'}</td><td>{o.weeksLeft} semaine(s)</td></tr>
+              ))}
+            </tbody>
+          </table>
+        </Panel>
+      )}
+
+      {showBuy && <BuyAircraftForm state={state} dispatch={dispatch} notify={notify} onDone={() => setShowBuy(false)} />}
+    </div>
+  );
+}
+
+function BuyAircraftForm({ state, dispatch, notify, onDone }) {
+  const [typeId, setTypeId] = useState(AIRCRAFT_TYPES[2].id);
+  const [ownership, setOwnership] = useState('LEASED');
+  const type = aircraftType(typeId);
+  return (
+    <Panel title="Acquérir un appareil" right={<button className="btn btn-xs" onClick={onDone}><X size={13} /></button>}>
+      <div className="ac-grid">
+        {AIRCRAFT_TYPES.map(t => (
+          <button key={t.id} className={'ac-card' + (t.id === typeId ? ' selected' : '')} onClick={() => setTypeId(t.id)}>
+            <div className="ac-card-name">{t.name}</div>
+            <div className="ac-card-spec">{t.seats} sièges · {fmtNum(t.rangeKm)} km</div>
+            <div className="ac-card-spec">{fmtMoney(t.price)} achat · {fmtMoney(t.leaseWeekly)}/sem. location</div>
+          </button>
+        ))}
+      </div>
+      <div className="form-grid" style={{ marginTop: 12 }}>
+        <label className="field">
+          <span>Mode d'acquisition</span>
+          <select value={ownership} onChange={e => setOwnership(e.target.value)}>
+            <option value="LEASED">Location (pas d'apport, loyer hebdomadaire)</option>
+            <option value="OWNED">Achat (apport de 20 %, financement 10 ans)</option>
+          </select>
+        </label>
+      </div>
+      <button className="btn btn-primary" onClick={() => {
+        dispatch(s => {
+          const r = actionBuyAircraft(s, typeId, ownership);
+          if (r.error) { notify(r.error, 'bad'); return s; }
+          notify('Commande passée : ' + type.name + '.', 'good');
+          return r.state;
+        });
+        onDone();
+      }}>Confirmer</button>
+    </Panel>
+  );
+}
+
+// -----------------------------------------------------------------------------
+// Finance screen
+// -----------------------------------------------------------------------------
+function FinanceScreen({ state }) {
+  const pl = state.finance.plHistory.slice(-26);
+  const chartData = pl.map(p => ({ week: 'S' + p.week, Carburant: Math.round(p.breakdown.fuel), Équipage: Math.round(p.breakdown.crew), Maintenance: Math.round(p.breakdown.maint), Aéroports: Math.round(p.breakdown.airport), Autres: Math.round(p.breakdown.handling + p.breakdown.distribution + p.breakdown.insurance + p.breakdown.overhead + p.breakdown.interest + p.breakdown.leasing) }));
+  const last = pl.length ? pl[pl.length - 1] : null;
+  const fv = fleetValue(state);
+
+  return (
+    <div className="screen">
+      <div className="kpi-row">
+        <KpiCard icon={Wallet} label="Trésorerie" value={fmtMoney(state.company.cash)} tone={state.company.cash < 0 ? 'bad' : 'good'} />
+        <KpiCard icon={TrendingUp} label="Revenus (dern. sem.)" value={last ? fmtMoney(last.revenue) : '—'} />
+        <KpiCard icon={TrendingDown} label="Coûts (dern. sem.)" value={last ? fmtMoney(last.costs) : '—'} />
+        <KpiCard icon={Building2} label="Valeur de flotte (nette)" value={fmtMoney(fv)} />
+      </div>
+
+      <Panel title="Répartition des coûts (26 dernières semaines)">
+        <ResponsiveContainer width="100%" height={240}>
+          <BarChart data={chartData}>
+            <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+            <XAxis dataKey="week" stroke="var(--text-dim)" fontSize={11} />
+            <YAxis stroke="var(--text-dim)" fontSize={11} tickFormatter={v => fmtMoney(v)} width={64} />
+            <Tooltip contentStyle={tooltipStyle} formatter={v => fmtMoney(v)} />
+            <Legend wrapperStyle={{ fontSize: 12 }} />
+            <Bar dataKey="Carburant" stackId="c" fill="#E8A33D" />
+            <Bar dataKey="Équipage" stackId="c" fill="#4FC1E9" />
+            <Bar dataKey="Maintenance" stackId="c" fill="#8B7FD1" />
+            <Bar dataKey="Aéroports" stackId="c" fill="#6FBF73" />
+            <Bar dataKey="Autres" stackId="c" fill="#5B6478" />
+          </BarChart>
+        </ResponsiveContainer>
+      </Panel>
+
+      <Panel title="Emprunts en cours">
+        {state.finance.loans.length === 0 && <div className="empty-hint">Aucun emprunt actif.</div>}
+        {state.finance.loans.length > 0 && (
+          <table className="data-table">
+            <thead><tr><th>Capital restant</th><th>Échéance hebdo.</th><th>Semaines restantes</th></tr></thead>
+            <tbody>
+              {state.finance.loans.map(l => (
+                <tr key={l.id}><td className="mono">{fmtMoney(l.principal)}</td><td className="mono">{fmtMoney(l.weeklyPayment)}</td><td className="mono">{l.remainingWeeks}</td></tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Panel>
+    </div>
+  );
+}
+
+// -----------------------------------------------------------------------------
+// Market screen
+// -----------------------------------------------------------------------------
+const STRATEGY_LABELS = {
+  PREMIUM_NETWORK: 'Réseau haut de gamme',
+  LOWCOST: 'Bas coûts',
+  MEGA_HUB: 'Méga-hub',
+  REGIONAL: 'Régional',
+};
+
+function MarketScreen({ state }) {
+  return (
+    <div className="screen">
+      <Panel title="Compagnies concurrentes">
+        <div className="comp-grid">
+          {state.market.competitors.map(c => (
+            <div key={c.id} className="comp-card" style={{ borderTopColor: c.theme }}>
+              <div className="comp-card-head">
+                <span className="comp-dot" style={{ background: c.theme }} />
+                <span className="comp-name">{c.name}</span>
+              </div>
+              <div className="comp-row"><span>Positionnement</span><span>{STRATEGY_LABELS[c.strategy]}</span></div>
+              <div className="comp-row"><span>Base</span><span>{airport(c.hub).city} ({c.hub})</span></div>
+              <div className="comp-row"><span>Lignes exploitées</span><span>{c.routes.length}</span></div>
+              <div className="comp-row"><span>Flotte estimée</span><span>{c.fleet.length}+ appareils</span></div>
+            </div>
+          ))}
+        </div>
+      </Panel>
+      <Panel title="Conjoncture">
+        <div className="form-grid">
+          <div className="stat-tile"><div className="stat-tile-label">Indice de carburant</div><div className="stat-tile-value">{state.market.fuelPrice.toFixed(2)} $/L</div></div>
+          <div className="stat-tile"><div className="stat-tile-label">Indice de demande globale</div><div className="stat-tile-value">{Math.round(state.market.macro.demandIndex * 100)} %</div></div>
+        </div>
+      </Panel>
+    </div>
+  );
+}
+
+// -----------------------------------------------------------------------------
+// Journal
+// -----------------------------------------------------------------------------
+function JournalScreen({ state }) {
+  const entries = [...state.log].reverse();
+  return (
+    <div className="screen">
+      <Panel title="Journal de la compagnie">
+        {entries.length === 0 && <div className="empty-hint">Rien à signaler pour l'instant.</div>}
+        {entries.map((l, i) => (
+          <div key={i} className="log-row"><span className="log-week">S{l.week}</span><span>{l.text}</span></div>
+        ))}
+      </Panel>
+    </div>
+  );
+}
+
+// -----------------------------------------------------------------------------
+// Help
+// -----------------------------------------------------------------------------
+function HelpScreen({ onReset }) {
+  const [confirmReset, setConfirmReset] = useState(false);
+  return (
+    <div className="screen">
+      <Panel title="Prise en main">
+        <div className="help-block">
+          <h4>Principe général</h4>
+          <p>Chaque semaine, vous ajustez votre flotte, vos lignes et vos tarifs, puis vous cliquez sur « Avancer d'une semaine ». Le marché réagit à vos décisions — et à celles de vos concurrents.</p>
+        </div>
+        <div className="help-block">
+          <h4>Ouvrir une ligne</h4>
+          <p>Depuis l'onglet Réseau, choisissez un appareil disponible, une origine, une destination à sa portée, une fréquence hebdomadaire, un créneau horaire et une stratégie tarifaire.</p>
+        </div>
+        <div className="help-block">
+          <h4>Stratégies tarifaires</h4>
+          <p>Discount et Value privilégient le volume à bas tarif. Compétitif équilibre les deux. Premium vise une clientèle prête à payer plus pour davantage de disponibilité et de flexibilité. Yield optimisé ajuste automatiquement les tarifs selon le remplissage constaté.</p>
+        </div>
+        <div className="help-block">
+          <h4>Ce qui compte</h4>
+          <p>Le prix seul ne suffit pas : les horaires, la fréquence, la ponctualité, la réputation et l'adéquation entre la taille de l'appareil et la demande du marché influencent tous le résultat. Une ligne peut devenir déficitaire même si elle a bien démarré — surveillez vos alertes.</p>
+        </div>
+        <div className="help-block">
+          <h4>Correspondances</h4>
+          <p>Si vous exploitez deux lignes qui se rejoignent sur une même base, une partie de la demande entre les deux extrémités peut emprunter cette correspondance — la valeur d'un hub se construit ainsi, progressivement.</p>
+        </div>
+        <div className="help-block">
+          <h4>Faillite</h4>
+          <p>Une trésorerie durablement très négative peut conduire à la cessation de paiements. Surveillez votre trésorerie et évitez de sur-financer des appareils trop grands pour vos lignes.</p>
+        </div>
+      </Panel>
+      <Panel title="Partie">
+        {!confirmReset && <button className="btn btn-danger" onClick={() => setConfirmReset(true)}><Trash2 size={14} /> Réinitialiser la partie</button>}
+        {confirmReset && (
+          <div className="confirm-row">
+            <span>Cette action supprime définitivement votre progression. Confirmer ?</span>
+            <button className="btn btn-danger btn-sm" onClick={onReset}>Oui, réinitialiser</button>
+            <button className="btn btn-sm" onClick={() => setConfirmReset(false)}>Annuler</button>
+          </div>
+        )}
+      </Panel>
+    </div>
+  );
+}
+
+// -----------------------------------------------------------------------------
+// Bankruptcy screen
+// -----------------------------------------------------------------------------
+function BankruptcyScreen({ state, onReset }) {
+  return (
+    <div className="onboarding">
+      <div className="onboarding-card">
+        <div className="onboarding-hero"><AlertTriangle size={30} color="#E1595A" /><div><div className="onboarding-eyebrow">Cessation de paiements</div><h1>{state.company.name} a fait faillite</h1></div></div>
+        <p className="onboarding-copy">
+          Après {state.meta.week} semaines d'exploitation, la trésorerie négative prolongée a conduit à la liquidation de la compagnie.
+          Un réseau mal dimensionné par rapport à sa flotte, ou un financement trop lourd, en sont généralement la cause.
+        </p>
+        <button className="btn btn-primary btn-lg" onClick={onReset}>Fonder une nouvelle compagnie</button>
+      </div>
+    </div>
+  );
+}
+
+// -----------------------------------------------------------------------------
+// Root App
+// -----------------------------------------------------------------------------
+function App() {
+  const [state, setState] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [screen, setScreen] = useState('DASHBOARD');
+  const [advancing, setAdvancing] = useState(false);
+  const [toasts, setToasts] = useState([]);
+  const toastId = useRef(0);
+  const [saveLabel, setSaveLabel] = useState('');
+
+  useEffect(() => {
+    (async () => {
+      const saved = await loadSave();
+      if (saved) setState(saved);
+      setLoading(false);
+    })();
+  }, []);
+
+  const notify = useCallback((text, tone) => {
+    const id = ++toastId.current;
+    setToasts(t => [...t, { id, text, tone: tone || 'neutral' }]);
+    setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 3200);
+  }, []);
+
+  const persist = useCallback(async (s) => {
+    setSaveLabel('Enregistrement…');
+    const ok = await writeSave(s);
+    setSaveLabel(ok ? 'Sauvegardé' : 'Sauvegarde indisponible');
+    setTimeout(() => setSaveLabel(''), 1500);
+  }, []);
+
+  const dispatch = useCallback((fn) => {
+    setState(prev => {
+      const next = fn(prev);
+      persist(next);
+      return next;
+    });
+  }, [persist]);
+
+  const handleCreate = (name, base) => {
+    const s = newGame(name, base, Math.floor(Math.random() * 100000));
+    setState(s);
+    persist(s);
+  };
+
+  const handleAdvance = () => {
+    setAdvancing(true);
+    setTimeout(() => {
+      setState(prev => {
+        const next = weeklyTick(prev);
+        persist(next);
+        return next;
+      });
+      setAdvancing(false);
+    }, 120);
+  };
+
+  const handleReset = async () => {
+    await clearSave();
+    setState(null);
+    setScreen('DASHBOARD');
+  };
+
+  if (loading) {
+    return <div className="app-loading"><Plane size={26} /><span>Chargement…</span></div>;
+  }
+  if (!state) {
+    return <><GlobalStyle /><Onboarding onCreate={handleCreate} /></>;
+  }
+  if (state.company.bankrupt) {
+    return <><GlobalStyle /><BankruptcyScreen state={state} onReset={handleReset} /></>;
+  }
+
+  let content;
+  if (screen === 'DASHBOARD') content = <Dashboard state={state} />;
+  else if (screen === 'NETWORK') content = <NetworkScreen state={state} dispatch={dispatch} />;
+  else if (screen === 'FLEET') content = <FleetScreen state={state} dispatch={dispatch} notify={notify} />;
+  else if (screen === 'FINANCE') content = <FinanceScreen state={state} />;
+  else if (screen === 'MARKET') content = <MarketScreen state={state} />;
+  else if (screen === 'JOURNAL') content = <JournalScreen state={state} />;
+  else if (screen === 'HELP') content = <HelpScreen onReset={handleReset} />;
+
+  return (
+    <>
+      <GlobalStyle />
+      <div className="app-shell">
+        <Sidebar screen={screen} setScreen={setScreen} company={state.company} />
+        <div className="app-main">
+          <TopBar state={state} onAdvance={handleAdvance} advancing={advancing} saveLabel={saveLabel} />
+          <div className="app-content">{content}</div>
+        </div>
+      </div>
+      <Toast items={toasts} />
+    </>
+  );
+}
+
+function GlobalStyle() {
+  return (
+    <style>{`
+      @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap');
+      :root {
+        --bg: #0E141F; --panel: #161E2C; --panel-alt: #1C2637; --border: #2A3448;
+        --text: #E7ECF5; --text-dim: #8B96AC; --amber: #E8A33D; --cyan: #4FC1E9;
+        --good: #4CAF7D; --bad: #E1595A; --mid: #E8A33D;
+      }
+      * { box-sizing: border-box; }
+      .app-shell, .onboarding, .app-loading { font-family: 'Inter', -apple-system, 'Segoe UI', sans-serif; color: var(--text); }
+      .mono { font-family: 'IBM Plex Mono', ui-monospace, monospace; }
+      .app-shell { display: flex; height: 100%; min-height: 640px; background: var(--bg); }
+      .app-loading { display:flex; align-items:center; justify-content:center; gap:10px; height: 100%; min-height: 400px; background: var(--bg); }
+      .sidebar { width: 220px; flex-shrink: 0; background: var(--panel); border-right: 1px solid var(--border); display: flex; flex-direction: column; padding: 16px 10px; }
+      .sidebar-brand { display: flex; align-items: center; gap: 10px; padding: 6px 10px 18px; color: var(--amber); }
+      .brand-name { font-weight: 600; font-size: 13.5px; color: var(--text); line-height: 1.3; }
+      .brand-sub { font-size: 11px; color: var(--text-dim); }
+      .nav-item { display: flex; align-items: center; gap: 10px; width: 100%; padding: 9px 10px; background: transparent; border: none; color: var(--text-dim); font-size: 13px; border-radius: 6px; cursor: pointer; text-align: left; margin-bottom: 2px; }
+      .nav-item:hover { background: var(--panel-alt); color: var(--text); }
+      .nav-item.active { background: var(--panel-alt); color: var(--cyan); font-weight: 600; }
+      .app-main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+      .topbar { display: flex; align-items: center; gap: 26px; padding: 12px 22px; border-bottom: 1px solid var(--border); background: var(--panel); }
+      .topbar-label { font-size: 10.5px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .04em; }
+      .topbar-value { font-size: 15px; font-weight: 600; font-family: 'IBM Plex Mono', monospace; }
+      .topbar-value.neg { color: var(--bad); } .topbar-value.pos { color: var(--good); }
+      .topbar-spacer { flex: 1; }
+      .save-indicator { font-size: 11px; color: var(--text-dim); min-width: 90px; text-align: right; }
+      .app-content { flex: 1; overflow-y: auto; padding: 20px 24px 60px; }
+      .screen { display: flex; flex-direction: column; gap: 16px; }
+      .kpi-row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; }
+      .kpi-card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 13px 14px; display: flex; gap: 11px; align-items: flex-start; }
+      .kpi-icon { width: 30px; height: 30px; border-radius: 6px; display: flex; align-items: center; justify-content: center; background: var(--panel-alt); color: var(--cyan); flex-shrink: 0; }
+      .kpi-icon.tone-good { color: var(--good); } .kpi-icon.tone-bad { color: var(--bad); } .kpi-icon.tone-mid { color: var(--amber); }
+      .kpi-label { font-size: 11px; color: var(--text-dim); margin-bottom: 3px; }
+      .kpi-value { font-size: 16px; font-weight: 700; font-family: 'IBM Plex Mono', monospace; }
+      .kpi-sub { font-size: 10.5px; color: var(--text-dim); margin-top: 2px; }
+      .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+      .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+      .panel-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid var(--border); }
+      .panel-head h3 { margin: 0; font-size: 13px; font-weight: 600; color: var(--text); }
+      .panel-body { padding: 14px 16px; }
+      .empty-hint { color: var(--text-dim); font-size: 12.5px; padding: 8px 0; }
+      .data-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+      .data-table th { text-align: left; color: var(--text-dim); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: .03em; padding: 7px 8px; border-bottom: 1px solid var(--border); }
+      .data-table td { padding: 8px 8px; border-bottom: 1px solid var(--border); }
+      .data-table tbody tr:hover { background: var(--panel-alt); cursor: pointer; }
+      .data-table tr.row-dim { opacity: .5; }
+      .data-table tr.row-detail:hover { background: transparent; cursor: default; }
+      .neg { color: var(--bad); } .pos { color: var(--good); } .text-dim { color: var(--text-dim); }
+      .badge { font-size: 10.5px; padding: 2px 7px; border-radius: 20px; font-weight: 600; }
+      .badge-good { background: rgba(76,175,125,.15); color: var(--good); }
+      .badge-mid { background: rgba(232,163,61,.15); color: var(--amber); }
+      .inline-select { background: var(--panel-alt); border: 1px solid var(--border); color: var(--text); border-radius: 5px; padding: 3px 5px; font-size: 12px; }
+      .btn { display: inline-flex; align-items: center; gap: 6px; background: var(--panel-alt); border: 1px solid var(--border); color: var(--text); padding: 8px 14px; border-radius: 6px; font-size: 12.5px; font-weight: 500; cursor: pointer; }
+      .btn:hover { border-color: var(--cyan); } .btn:disabled { opacity: .4; cursor: not-allowed; }
+      .btn-primary { background: var(--amber); border-color: var(--amber); color: #1A1204; font-weight: 600; }
+      .btn-primary:hover { filter: brightness(1.08); border-color: var(--amber); }
+      .btn-danger { background: rgba(225,89,90,.12); border-color: var(--bad); color: var(--bad); }
+      .btn-lg { padding: 11px 20px; font-size: 13.5px; width: 100%; justify-content: center; margin-top: 6px; }
+      .btn-sm { padding: 6px 10px; font-size: 12px; } .btn-xs { padding: 4px 8px; font-size: 11.5px; }
+      .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 12px; }
+      .field { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--text-dim); }
+      .field input, .field select { background: var(--panel-alt); border: 1px solid var(--border); color: var(--text); padding: 9px 10px; border-radius: 6px; font-size: 13px; font-family: inherit; }
+      .field input:focus, .field select:focus { outline: none; border-color: var(--cyan); }
+      .ac-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+      .ac-card { background: var(--panel-alt); border: 1px solid var(--border); border-radius: 7px; padding: 10px; text-align: left; cursor: pointer; color: var(--text); }
+      .ac-card.selected { border-color: var(--cyan); background: rgba(79,193,233,.08); }
+      .ac-card-name { font-weight: 600; font-size: 12.5px; margin-bottom: 4px; }
+      .ac-card-spec { font-size: 11px; color: var(--text-dim); }
+      .cond-bar { width: 100%; height: 7px; background: var(--panel-alt); border-radius: 4px; overflow: hidden; }
+      .cond-fill { height: 100%; } .cond-fill.tone-good { background: var(--good); } .cond-fill.tone-mid { background: var(--amber); } .cond-fill.tone-bad { background: var(--bad); }
+      .alert-row { display: flex; align-items: center; gap: 8px; font-size: 12.5px; padding: 7px 0; border-bottom: 1px solid var(--border); color: var(--text); }
+      .alert-row:last-child { border-bottom: none; }
+      .alert-row.tone-bad { color: var(--bad); } .alert-row.tone-mid { color: var(--amber); }
+      .log-row { display: flex; gap: 10px; font-size: 12.5px; padding: 7px 0; border-bottom: 1px solid var(--border); }
+      .log-row:last-child { border-bottom: none; }
+      .log-week { color: var(--text-dim); font-family: 'IBM Plex Mono', monospace; flex-shrink: 0; }
+      .comp-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; }
+      .comp-card { background: var(--panel-alt); border: 1px solid var(--border); border-top: 3px solid; border-radius: 7px; padding: 12px; }
+      .comp-card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+      .comp-dot { width: 9px; height: 9px; border-radius: 50%; }
+      .comp-name { font-weight: 600; font-size: 13px; }
+      .comp-row { display: flex; justify-content: space-between; font-size: 11.5px; color: var(--text-dim); padding: 3px 0; }
+      .comp-row span:last-child { color: var(--text); }
+      .stat-tile { background: var(--panel-alt); border: 1px solid var(--border); border-radius: 7px; padding: 12px; }
+      .stat-tile-label { font-size: 11px; color: var(--text-dim); margin-bottom: 4px; }
+      .stat-tile-value { font-size: 16px; font-weight: 700; font-family: 'IBM Plex Mono', monospace; }
+      .help-block { margin-bottom: 14px; }
+      .help-block h4 { margin: 0 0 4px; font-size: 13px; color: var(--cyan); }
+      .help-block p { margin: 0; font-size: 12.5px; color: var(--text-dim); line-height: 1.55; }
+      .confirm-row { display: flex; align-items: center; gap: 10px; font-size: 12.5px; color: var(--text-dim); }
+      .onboarding { display: flex; align-items: center; justify-content: center; height: 100%; min-height: 560px; background: var(--bg); padding: 20px; }
+      .onboarding-card { width: 100%; max-width: 420px; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 28px; }
+      .onboarding-hero { display: flex; align-items: center; gap: 12px; color: var(--amber); margin-bottom: 14px; }
+      .onboarding-eyebrow { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .05em; }
+      .onboarding-hero h1 { margin: 2px 0 0; font-size: 20px; color: var(--text); }
+      .onboarding-copy { font-size: 13px; color: var(--text-dim); line-height: 1.6; margin-bottom: 18px; }
+      .toast-stack { position: fixed; bottom: 18px; right: 18px; display: flex; flex-direction: column; gap: 8px; z-index: 50; }
+      .toast { background: var(--panel-alt); border: 1px solid var(--border); border-radius: 7px; padding: 10px 14px; font-size: 12.5px; color: var(--text); box-shadow: 0 6px 20px rgba(0,0,0,.35); }
+      .toast.tone-bad { border-color: var(--bad); color: var(--bad); }
+      .toast.tone-good { border-color: var(--good); color: var(--good); }
+      @media (max-width: 900px) {
+        .kpi-row { grid-template-columns: repeat(2, 1fr); } .grid-2 { grid-template-columns: 1fr; }
+        .sidebar { width: 64px; } .sidebar-brand-text, .nav-item span { display: none; }
+        .topbar { flex-wrap: wrap; gap: 14px; }
+      }
+    `}</style>
+  );
+}
+
+export default App;
