@@ -1,0 +1,41 @@
+name: Apply AeroDesk realism phase 10
+
+on:
+  push:
+    paths:
+      - scripts/apply-realism-phase10.mjs
+      - .github/workflows/apply-realism-phase10.yml
+
+permissions:
+  contents: write
+
+jobs:
+  improve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout realism branch
+        uses: actions/checkout@v4
+        with:
+          ref: fix/aerodesk-v3-accounting-runtime
+
+      - name: Apply phase 10 realism upgrade
+        run: node scripts/apply-realism-phase10.mjs
+
+      - name: Run complete regression suite
+        run: node --test tests/*.test.mjs
+
+      - name: Validate JSX bundle
+        run: npx --yes esbuild aerodesk.jsx --bundle --loader:.jsx=jsx --external:react --external:recharts --external:lucide-react --outfile=/tmp/aerodesk-check.js
+
+      - name: Commit upgraded AeroDesk source
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add aerodesk.jsx
+          if git diff --cached --quiet; then
+            echo "No source changes to commit"
+          else
+            git commit -m "fix: use directional rotation counts for booked demand"
+            git push origin HEAD:fix/aerodesk-v3-accounting-runtime
+          fi
