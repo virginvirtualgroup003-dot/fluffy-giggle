@@ -202,15 +202,15 @@ function getISOWeek(date) {
 function scheduledDeparturesBetween(route, fromMs, toMs) {
   let count = 0;
   const start = new Date(fromMs);
-  start.setHours(0, 0, 0, 0);
+  start.setUTCHours(0, 0, 0, 0);
   const end = new Date(toMs);
-  end.setHours(0, 0, 0, 0);
+  end.setUTCHours(0, 0, 0, 0);
   for (let d = new Date(start); d <= end; d = new Date(d.getTime() + DAY_MS)) {
-    const dow = d.getDay();
+    const dow = d.getUTCDay();
     (route.schedule || []).forEach(slot => {
       if (slot.dayOfWeek !== dow) return;
       const departure = new Date(d);
-      departure.setHours(Math.floor(slot.minute / 60), slot.minute % 60, 0, 0);
+      departure.setUTCHours(Math.floor(slot.minute / 60), slot.minute % 60, 0, 0);
       if (departure.getTime() > fromMs && departure.getTime() <= toMs) count += 1;
     });
   }
@@ -329,19 +329,27 @@ function scheduleFitScore(seg, departSlots) {
   return best;
 }
 
+function routeHasActiveAircraft(state, route) {
+  return state.fleet.some(f => f.assignedRouteId === route.id && f.status === 'ACTIVE');
+}
+
 function buildPlayerProducts(state, originId, destId) {
   const products = [];
-  const direct = state.routes.find(r => r.status === 'ACTIVE' && r.originId === originId && r.destId === destId);
-  if (direct) {
-    products.push(makeProductFromRoute(direct, 'PLAYER', state.company, [direct]));
-  }
-  // one-stop via player's own hub(s): any active route origin->hub and hub->dest
-  const legsOut = state.routes.filter(r => r.status === 'ACTIVE' && r.originId === originId && r.destId !== destId);
+  const directRoutes = state.routes.filter(r =>
+    r.status === 'ACTIVE' && r.originId === originId && r.destId === destId && routeHasActiveAircraft(state, r)
+  );
+  directRoutes.forEach(route => products.push(makeProductFromRoute(route, 'PLAYER', state.company, [route])));
+
+  // One-stop products are offered only when both operating legs have serviceable aircraft.
+  const legsOut = state.routes.filter(r =>
+    r.status === 'ACTIVE' && r.originId === originId && r.destId !== destId && routeHasActiveAircraft(state, r)
+  );
   legsOut.forEach(leg1 => {
-    const leg2 = state.routes.find(r => r.status === 'ACTIVE' && r.originId === leg1.destId && r.destId === destId);
-    if (leg2 && leg1.destId !== originId) {
-      products.push(makeConnectProduct([leg1, leg2], 'PLAYER', state.company));
-    }
+    state.routes
+      .filter(r => r.status === 'ACTIVE' && r.originId === leg1.destId && r.destId === destId && routeHasActiveAircraft(state, r))
+      .forEach(leg2 => {
+        if (leg1.destId !== originId) products.push(makeConnectProduct([leg1, leg2], 'PLAYER', state.company));
+      });
   });
   return products;
 }
@@ -407,7 +415,10 @@ function makeProductFromCompetitorRoute(route, competitor) {
 
 function productFareForSegment(product, seg) {
   const strat = FARE_STRATEGIES[product.fareStrategy] || FARE_STRATEGIES.COMPETITIVE;
-  const ref = fareReference(product.distanceKm) * strat.refMult;
+  const routeMultiplier = product.fareStrategy === 'YIELD_OPTIMIZED'
+    ? (product.route?._yieldMult || strat.refMult)
+    : strat.refMult;
+  const ref = fareReference(product.distanceKm) * routeMultiplier;
   const p = SEG_PARAMS[seg];
   return ref * p.fareMult;
 }
@@ -416,8 +427,11 @@ function productUtility(product, seg, marketState) {
   const p = SEG_PARAMS[seg];
   const strat = FARE_STRATEGIES[product.fareStrategy] || FARE_STRATEGIES.COMPETITIVE;
   const fare = productFareForSegment(product, seg);
-  const availShare = strat.alloc.flex + strat.alloc.prem;
-  const valueShare = strat.alloc.deep + strat.alloc.disc;
+  const alloc = product.fareStrategy === 'YIELD_OPTIMIZED' && product.route?._yieldAlloc
+    ? product.route._yieldAlloc
+    : strat.alloc;
+  const availShare = alloc.flex + alloc.prem;
+  const valueShare = alloc.deep + alloc.disc;
   const sched = scheduleFitScore(seg, product.departSlots);
   const priorShare = marketState.priorShare[product.owner] || 0;
   let u = -p.priceBeta * fare
@@ -427,6 +441,7 @@ function productUtility(product, seg, marketState) {
     + p.schedW * sched
     - p.durW * product.totalTripHours
     - p.stopPen * (product.legs - 1)
+    - p.mctPen * Math.max(0, (product.mctGap || 0) - 0.75)
     + p.reputW * (product.reputation - 50) / 50
     + p.otpW * (product.otp - 80) / 20
     + p.loyaltyW * priorShare;
@@ -441,7 +456,7 @@ function computeMarketOutcome(state, originId, destId, weekOfYear) {
   const products = [...playerProducts, ...compProducts];
   if (products.length === 0) return null;
 
-  const marketKey = originId + '-' + destId;
+  const marketKey = originId + '|' + destId;
   const priorShare = state._priorShareCache && state._priorShareCache[marketKey] || {};
   const marketState = { priorShare };
 
@@ -572,9 +587,6 @@ function v3ProcessRecurringCosts(state, elapsedMs) {
   v3BookAccounting(state, 'laborExpense', labor);
   v3BookAccounting(state, 'insuranceExpense', insurance);
 
-  addLedger(state, state.meta.week, 'LABOR', -labor, 'Personnel et charges opérationnelles');
-  addLedger(state, state.meta.week, 'INSURANCE', -insurance, 'Assurance flotte');
-
   return { labor, insurance };
 }
 
@@ -658,12 +670,13 @@ function realTimeTick(prevState, nowMs = Date.now()) {
   state.meta.lastProcessedAt = target;
   state.meta.currentTime = new Date(target).toISOString();
   state.meta.totalRealTimeHours = (state.meta.totalRealTimeHours || 0) + (target - previousMs) / 3600000;
-  checkBankruptcy(state);
+  checkBankruptcy(state, target);
   return state;
 }
 
 function processRealTimeDay(state, fromMs, toMs, rng) {
   const elapsed = toMs - fromMs;
+  restoreMaintenanceRealTime(state, toMs);
   const marketKeys = new Set();
   state.routes.filter(r => r.status === 'ACTIVE').forEach(r => {
     marketKeys.add(r.originId + '|' + r.destId);
@@ -774,7 +787,7 @@ function processRealTimeDay(state, fromMs, toMs, rng) {
 
     const loadFactor = flights ? pax / (type.seats * flights) : 0;
     route.history = route.history || [];
-    route.history.push({ time: new Date(toMs).toISOString(), week: state.meta.week, pax: Math.round(pax), revenue: routeRev, cost: routeCost, loadFactor });
+    route.history.push({ time: new Date(toMs).toISOString(), week: state.meta.week, pax: Math.round(pax), revenue: routeRev + ancillary, cost: routeCost + carbonCost, loadFactor });
     if (route.history.length > 365) route.history.splice(0, route.history.length - 365);
     if (route.fareStrategy === 'YIELD_OPTIMIZED') adaptYield(route, loadFactor);
 
@@ -823,20 +836,42 @@ function processRealTimeDay(state, fromMs, toMs, rng) {
 
   state.company.cash += revenue - costs - principalPaid;
   const netIncome = revenue - costs;
-  state.finance.plHistory.push({ week: state.meta.week, time: new Date(toMs).toISOString(), revenue, costs, netIncome, breakdown });
-  if (state.finance.plHistory.length > 365) state.finance.plHistory.splice(0, state.finance.plHistory.length - 365);
-  state.finance.cashHistory.push({ week: state.meta.week, time: new Date(toMs).toISOString(), cash: state.company.cash });
-  if (state.finance.cashHistory.length > 730) state.finance.cashHistory.splice(0, state.finance.cashHistory.length - 730);
-  if (revenue || costs) {
-    addLedger(state, state.meta.week, 'REVENUE', revenue, 'Recettes en temps réel');
-    addLedger(state, state.meta.week, 'COSTS', -costs, 'Coûts en temps réel');
-  }
+  upsertWeeklyFinanceHistory(state, toMs, revenue, costs, netIncome, breakdown);
 
   state.fleet.forEach(f => { f.ageWeeks = (f.ageWeeks || 0) + elapsed / WEEK_MS; });
-  state.operations.activeFlights = state.routes.filter(r => r.status === 'ACTIVE').length;
-  runCompetitorAI(state, rng, compRouteRevenue);
-  updateReputationAndOtp(state, rng);
-  maybeTriggerEvent(state, rng);
+  state.operations.activeFlights = 0;
+  runCompetitorAI(state, rng, compRouteRevenue, elapsed);
+  updateReputationAndOtp(state, rng, elapsed);
+  maybeTriggerEvent(state, rng, elapsed);
+}
+
+function upsertWeeklyFinanceHistory(state, toMs, revenue, costs, netIncome, breakdown) {
+  const date = new Date(toMs);
+  const week = getISOWeek(date);
+  const year = date.getUTCFullYear();
+  const periodKey = year + '-W' + String(week).padStart(2, '0');
+  const time = date.toISOString();
+  const last = state.finance.plHistory[state.finance.plHistory.length - 1];
+
+  if (last?.periodKey === periodKey) {
+    last.time = time;
+    last.revenue += revenue;
+    last.costs += costs;
+    last.netIncome += netIncome;
+    Object.keys(breakdown).forEach(key => { last.breakdown[key] = (last.breakdown[key] || 0) + (breakdown[key] || 0); });
+  } else {
+    state.finance.plHistory.push({ periodKey, year, week, time, revenue, costs, netIncome, breakdown: { ...breakdown } });
+  }
+  if (state.finance.plHistory.length > 156) state.finance.plHistory.splice(0, state.finance.plHistory.length - 156);
+
+  const cashLast = state.finance.cashHistory[state.finance.cashHistory.length - 1];
+  if (cashLast?.periodKey === periodKey) {
+    cashLast.time = time;
+    cashLast.cash = state.company.cash;
+  } else {
+    state.finance.cashHistory.push({ periodKey, year, week, time, cash: state.company.cash });
+  }
+  if (state.finance.cashHistory.length > 156) state.finance.cashHistory.splice(0, state.finance.cashHistory.length - 156);
 }
 
 function routeRevenueValue(map, id) { return map[id] || 0; }
@@ -853,13 +888,24 @@ function updateMacroRealTime(state, rng, elapsedMs) {
 
 function processDeliveriesRealTime(state, nowMs) {
   state.orders = state.orders.filter(o => {
-    if (!o.deliveryAt) o.deliveryAt = nowMs + Math.max(1, o.weeksLeft || 1) * 7 * DAY_MS;
+    if (!o.deliveryAt) o.deliveryAt = nowMs + Math.max(1, o.weeksLeft || 1) * WEEK_MS;
+    o.weeksLeft = Math.max(0, (o.deliveryAt - nowMs) / WEEK_MS);
     if (o.deliveryAt <= nowMs) {
       state.fleet.push({ id: 'AC' + (state.company.nextAircraftSerial++), typeId: o.typeId, ownership: o.ownership, ageWeeks: 0, cycles: 0, flightHours: 0, condition: 100, status: 'ACTIVE', assignedRouteId: null });
       state.log.push({ week: state.meta.week, type: 'DELIVERY', text: `Livraison d'un ${aircraftType(o.typeId).name}.` });
       return false;
     }
     return true;
+  });
+}
+
+function restoreMaintenanceRealTime(state, nowMs) {
+  state.fleet.forEach(f => {
+    if (f.status !== 'MAINTENANCE' || !f.maintUntil || f.maintUntil > nowMs) return;
+    f.status = 'ACTIVE';
+    f.condition = clamp(f.condition + 20, 0, 100);
+    delete f.maintUntil;
+    state.log.push({ week: state.meta.week, type: 'MAINT', text: `${f.id} est remis en service après maintenance.` });
   });
 }
 
@@ -870,14 +916,18 @@ function avgConditionForRoute(state, route) {
 }
 
 function adaptYield(route, loadFactor) {
-  route._yieldMult = route._yieldMult || 1.0;
-  route._yieldAlloc = route._yieldAlloc || { ...FARE_STRATEGIES.YIELD_OPTIMIZED.alloc };
+  const base = FARE_STRATEGIES.YIELD_OPTIMIZED;
+  route._yieldMult = route._yieldMult || base.refMult;
+  route._yieldAlloc = route._yieldAlloc || { ...base.alloc };
   if (loadFactor > 0.88) {
     route._yieldMult = clamp(route._yieldMult + 0.015, 0.9, 1.35);
+    route._yieldAlloc.deep = clamp(route._yieldAlloc.deep - 0.01, 0.03, 0.25);
+    route._yieldAlloc.prem = clamp(route._yieldAlloc.prem + 0.01, 0.08, 0.30);
   } else if (loadFactor < 0.55) {
     route._yieldMult = clamp(route._yieldMult - 0.015, 0.75, 1.1);
+    route._yieldAlloc.deep = clamp(route._yieldAlloc.deep + 0.01, 0.08, 0.35);
+    route._yieldAlloc.prem = clamp(route._yieldAlloc.prem - 0.01, 0.04, 0.20);
   }
-  FARE_STRATEGIES.YIELD_OPTIMIZED.refMult = route._yieldMult; // simplified single global adaptive dial
 }
 
 function updateMacro(state, rng) {
@@ -924,31 +974,40 @@ function processMaintenance(state, rng) {
   });
 }
 
-function updateReputationAndOtp(state, rng) {
-  const fleetCondition = state.fleet.length ? state.fleet.reduce((s, f) => s + f.condition, 0) / state.fleet.length : 85;
-  const targetOtp = clamp(78 + fleetCondition / 6 - state.routes.filter(r => r.status === 'ACTIVE').length * 0.25 + (rng() - 0.5) * 6, 45, 98);
-  state.company.otp = state.company.otp + (targetOtp - state.company.otp) * 0.3;
-  const targetRep = clamp(40 + state.company.otp * 0.5, 0, 100);
-  state.company.reputation = clamp(state.company.reputation + (targetRep - state.company.reputation) * 0.06, 0, 100);
+function probabilityForElapsed(periodProbability, elapsedMs) {
+  const periods = Math.max(0, elapsedMs / WEEK_MS);
+  return 1 - Math.pow(1 - periodProbability, periods);
 }
 
-function runCompetitorAI(state, rng, compRouteRevenue) {
+function updateReputationAndOtp(state, rng, elapsedMs = WEEK_MS) {
+  const periods = Math.max(0, elapsedMs / WEEK_MS);
+  const fleetCondition = state.fleet.length ? state.fleet.reduce((s, f) => s + f.condition, 0) / state.fleet.length : 85;
+  const targetOtp = clamp(78 + fleetCondition / 6 - state.routes.filter(r => r.status === 'ACTIVE').length * 0.25 + (rng() - 0.5) * 6, 45, 98);
+  const otpAlpha = 1 - Math.pow(1 - 0.3, periods);
+  state.company.otp = state.company.otp + (targetOtp - state.company.otp) * otpAlpha;
+  const targetRep = clamp(40 + state.company.otp * 0.5, 0, 100);
+  const repAlpha = 1 - Math.pow(1 - 0.06, periods);
+  state.company.reputation = clamp(state.company.reputation + (targetRep - state.company.reputation) * repAlpha, 0, 100);
+}
+
+function runCompetitorAI(state, rng, compRouteRevenue, elapsedMs = WEEK_MS) {
   state.market.competitors.forEach(c => {
     c.routes.forEach(r => {
       const rev = compRouteRevenue['P-' + r.id] || 0;
       r.history.push(rev);
       if (r.history.length > 8) r.history.shift();
       const type = aircraftType(r.aircraftTypeId);
-      const cost = fuelBurnLiters(distanceBetween(r.origin, r.dest), type) * r.freq * state.market.fuelPrice * 1.3;
+      const periods = elapsedMs / WEEK_MS;
+      const cost = fuelBurnLiters(distanceBetween(r.origin, r.dest), type) * r.freq * state.market.fuelPrice * 1.3 * periods;
       const margin = rev - cost;
-      if (margin < -cost * 0.3 && rng() < 0.25) {
+      if (margin < -cost * 0.3 && rng() < probabilityForElapsed(0.25, elapsedMs)) {
         r.fareStrategy = r.fareStrategy === 'PREMIUM' ? 'COMPETITIVE' : r.fareStrategy === 'COMPETITIVE' ? 'VALUE' : r.fareStrategy;
-      } else if (margin > cost * 0.5 && rng() < 0.15) {
+      } else if (margin > cost * 0.5 && rng() < probabilityForElapsed(0.15, elapsedMs)) {
         r.fareStrategy = r.fareStrategy === 'VALUE' ? 'COMPETITIVE' : r.fareStrategy === 'COMPETITIVE' ? 'PREMIUM' : r.fareStrategy;
       }
     });
-    c.cash += (rng() - 0.42) * 1.5e6; // coarse abstracted cashflow drift for AI companies
-    if (rng() < 0.01 && c.routes.length < 14 && c.cash > 60e6) {
+    c.cash += (rng() - 0.42) * 1.5e6 * (elapsedMs / WEEK_MS);
+    if (rng() < probabilityForElapsed(0.01, elapsedMs) && c.routes.length < 14 && c.cash > 60e6) {
       const candidates = AIRPORTS.filter(a => a.id !== c.hub && !c.routes.find(r => r.dest === a.id));
       if (candidates.length) {
         const pick = candidates[Math.floor(rng() * candidates.length)];
@@ -963,8 +1022,8 @@ function runCompetitorAI(state, rng, compRouteRevenue) {
   });
 }
 
-function maybeTriggerEvent(state, rng) {
-  if (rng() < 0.05) {
+function maybeTriggerEvent(state, rng, elapsedMs = WEEK_MS) {
+  if (rng() < probabilityForElapsed(0.05, elapsedMs)) {
     const kinds = ['FUEL_SPIKE', 'TOURISM_BOOM', 'RECESSION_LOCAL', 'STRIKE'];
     const kind = kinds[Math.floor(rng() * kinds.length)];
     if (kind === 'FUEL_SPIKE') {
@@ -984,13 +1043,14 @@ function maybeTriggerEvent(state, rng) {
   }
 }
 
-function checkBankruptcy(state) {
+function checkBankruptcy(state, nowMs = Date.now()) {
   if (state.company.cash < -8e6) {
-    state.company._negativeStreak = (state.company._negativeStreak || 0) + 1;
+    if (!state.company.negativeCashSince) state.company.negativeCashSince = nowMs;
   } else {
-    state.company._negativeStreak = 0;
+    state.company.negativeCashSince = null;
+    return;
   }
-  if (state.company._negativeStreak >= 6) {
+  if (!state.company.bankrupt && nowMs - state.company.negativeCashSince >= 6 * WEEK_MS) {
     state.company.bankrupt = true;
     state.log.push({ week: state.meta.week, type: 'BANKRUPTCY', text: `Trésorerie négative prolongée : la compagnie est en cessation de paiements.` });
   }
@@ -1107,23 +1167,36 @@ function minuteToHHMM(m) { const h = Math.floor(m / 60), mm = m % 60; return Str
 // -----------------------------------------------------------------------------
 async function loadSave() {
   try {
-    const res = await window.storage.get(SAVE_KEY, false);
-    if (!res) return null;
-    return JSON.parse(res.value);
+    if (window.storage?.get) {
+      const res = await window.storage.get(SAVE_KEY, false);
+      if (res?.value) return JSON.parse(res.value);
+    }
+  } catch (e) { /* fall through to localStorage */ }
+  try {
+    const raw = window.localStorage?.getItem(SAVE_KEY);
+    return raw ? JSON.parse(raw) : null;
   } catch (e) {
     return null;
   }
 }
 async function writeSave(state) {
+  const payload = JSON.stringify(state);
   try {
-    await window.storage.set(SAVE_KEY, JSON.stringify(state), false);
+    if (window.storage?.set) {
+      await window.storage.set(SAVE_KEY, payload, false);
+      return true;
+    }
+  } catch (e) { /* fall through to localStorage */ }
+  try {
+    window.localStorage?.setItem(SAVE_KEY, payload);
     return true;
   } catch (e) {
     return false;
   }
 }
 async function clearSave() {
-  try { await window.storage.delete(SAVE_KEY, false); } catch (e) { /* noop */ }
+  try { if (window.storage?.delete) await window.storage.delete(SAVE_KEY, false); } catch (e) { /* noop */ }
+  try { window.localStorage?.removeItem(SAVE_KEY); } catch (e) { /* noop */ }
 }
 
 // -----------------------------------------------------------------------------
@@ -1562,7 +1635,7 @@ function FleetScreen({ state, dispatch, notify }) {
             <thead><tr><th>Type</th><th>Propriété</th><th>Livraison estimée</th></tr></thead>
             <tbody>
               {state.orders.map((o, i) => (
-                <tr key={i}><td>{aircraftType(o.typeId).name}</td><td>{o.ownership === 'OWNED' ? 'Propriété' : 'Location'}</td><td>{o.weeksLeft} semaine(s)</td></tr>
+                <tr key={i}><td>{aircraftType(o.typeId).name}</td><td>{o.ownership === 'OWNED' ? 'Propriété' : 'Location'}</td><td>{Math.max(0, o.weeksLeft || 0).toFixed(1)} semaine(s)</td></tr>
               ))}
             </tbody>
           </table>
