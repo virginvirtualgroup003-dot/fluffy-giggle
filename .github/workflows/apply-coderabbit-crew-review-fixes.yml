@@ -51,7 +51,9 @@ jobs:
       - name: Run tests
         run: node --test tests/*.test.mjs
       - name: Validate JSX bundle
-        run: pnpm dlx esbuild aerodesk.jsx --bundle --loader:.jsx=jsx --external:react --external:recharts --external:lucide-react --outfile=/tmp/aerodesk-coderabbit-fixes-check.js
+        run: |
+          corepack enable
+          pnpm dlx esbuild aerodesk.jsx --bundle --loader:.jsx=jsx --external:react --external:recharts --external:lucide-react --outfile=/tmp/aerodesk-coderabbit-fixes-check.js
       - name: Commit verified fixes
         run: |
           git config user.name "github-actions[bot]"
