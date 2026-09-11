@@ -7,7 +7,21 @@ function replaceFunction(name, replacement) {
   const token = `function ${name}(`;
   const start = source.indexOf(token);
   if (start < 0) throw new Error(`Function not found: ${name}`);
-  const brace = source.indexOf('{', start);
+
+  const parenStart = source.indexOf('(', start);
+  let parenDepth = 0;
+  let parenEnd = -1;
+  for (let i = parenStart; i < source.length; i += 1) {
+    if (source[i] === '(') parenDepth += 1;
+    else if (source[i] === ')') {
+      parenDepth -= 1;
+      if (parenDepth === 0) { parenEnd = i; break; }
+    }
+  }
+  if (parenEnd < 0) throw new Error(`Signature end not found: ${name}`);
+
+  const brace = source.indexOf('{', parenEnd);
+  if (brace < 0) throw new Error(`Body start not found: ${name}`);
   let depth = 0;
   let end = -1;
   for (let i = brace; i < source.length; i += 1) {
