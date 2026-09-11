@@ -155,6 +155,63 @@ function commerciallyAvailableAircraftTypes(timestampMs = Date.now()) {
   return AIRCRAFT_TYPES.filter(type => aircraftCommercialStatus(type.id, timestampMs).available);
 }
 
+
+// Regulatory market access is simplified to the freedoms-of-the-air concepts represented by
+// the game's geography. Specific bilateral/fifth/seventh/ninth-freedom rights can be granted
+// explicitly in company.trafficRights instead of assuming universal market access.
+const EU_COMMUNITY_AOC_COUNTRIES = new Set([
+  'France', 'Allemagne', 'Pays-Bas', 'Espagne', 'Italie', 'Belgique', 'Irlande',
+  'Portugal', 'Autriche', 'Danemark', 'Suède', 'Finlande', 'Grèce', 'Pologne',
+]);
+
+function hasSpecificTrafficRight(state, originId, destId) {
+  return (state?.company?.trafficRights || []).some(right =>
+    (right.originId === originId && right.destId === destId) ||
+    (right.originId === destId && right.destId === originId)
+  );
+}
+
+function trafficRightStatus(state, originId, destId) {
+  const origin = airport(originId);
+  const destination = airport(destId);
+  if (!origin || !destination) return { allowed: false, basis: 'REFERENCE', reason: 'Aéroport inconnu.' };
+  const aocCountry = state?.company?.aocCountry || airport(state?.company?.homeBase)?.country;
+  if (!aocCountry) return { allowed: false, basis: 'AOC', reason: 'Pays de l’AOC non défini.' };
+
+  if (hasSpecificTrafficRight(state, originId, destId)) {
+    return { allowed: true, basis: 'SPECIFIC_TRAFFIC_RIGHT', reason: null };
+  }
+
+  const originCountry = origin.country;
+  const destinationCountry = destination.country;
+  const communityCarrier = EU_COMMUNITY_AOC_COUNTRIES.has(aocCountry);
+  const bothCommunity = EU_COMMUNITY_AOC_COUNTRIES.has(originCountry) && EU_COMMUNITY_AOC_COUNTRIES.has(destinationCountry);
+
+  if (originCountry === destinationCountry) {
+    if (originCountry === aocCountry) return { allowed: true, basis: 'HOME_DOMESTIC', reason: null };
+    if (communityCarrier && bothCommunity) return { allowed: true, basis: 'EU_COMMUNITY_MARKET', reason: null };
+    return {
+      allowed: false,
+      basis: 'CABOTAGE',
+      reason: 'Cabotage étranger interdit sans droit ou autorisation spécifique.',
+    };
+  }
+
+  if (originCountry === aocCountry || destinationCountry === aocCountry) {
+    return { allowed: true, basis: '3RD_4TH_FREEDOM_HOME_STATE', reason: null };
+  }
+
+  if (communityCarrier && bothCommunity) {
+    return { allowed: true, basis: 'EU_COMMUNITY_MARKET', reason: null };
+  }
+
+  return {
+    allowed: false,
+    basis: 'EXTRA_BILATERAL_RIGHT_REQUIRED',
+    reason: 'Droit de trafic ou autorisation de 5e/7e liberté requis pour cette liaison hors pays de l’AOC.',
+  };
+}
+
 function haversineKm(a, b) {
   const R = 6371;
   const dLat = (b.lat - a.lat) * Math.PI / 180;
@@ -651,7 +708,8 @@ function newGame(companyName, homeBaseId, rngSeed) {
     version: 3,
     meta: { week: 1, year: new Date().getUTCFullYear(), weekOfYear: getISOWeek(new Date()), createdAt: Date.now(), lastProcessedAt: Date.now(), currentTime: new Date().toISOString(), rngSeed: rngSeed || Date.now() % 100000, realTime: true },
     company: {
-      name: companyName, homeBase: homeBaseId, cash: 45e6, currency: 'USD', reputation: 50, otp: 88,
+      name: companyName, homeBase: homeBaseId, aocCountry: airport(homeBaseId).country, trafficRights: [],
+      cash: 45e6, currency: 'USD', reputation: 50, otp: 88,
       founded: true, bankrupt: false, nextAircraftSerial: 1, nextRouteSerial: 1,
     },
     fleet: [],
@@ -1883,6 +1941,15 @@ function calculateDepreciationExpense(state, elapsedMs) {
 
 function actionOpenRoute(state, { originId, destId, aircraftTypeId, frequencyPerWeek, fareStrategy, departMinute }) {
   const s = structuredCloneLite(state);
+  if (!s.company.aocCountry) s.company.aocCountry = airport(s.company.homeBase)?.country;
+  if (!Array.isArray(s.company.trafficRights)) s.company.trafficRights = [];
+
+  const trafficRight = trafficRightStatus(s, originId, destId);
+  if (!trafficRight.allowed) {
+    s.lastActionError = trafficRight.reason;
+    return s;
+  }
+
   const issues = validateRoutePlan({ originId, destId, aircraftTypeId, departMinute });
   if (issues.length) {
     s.lastActionError = issues.map(issue => issue.message).join(' ');
