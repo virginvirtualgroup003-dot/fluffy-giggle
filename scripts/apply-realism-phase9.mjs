@@ -109,11 +109,17 @@ function actionBuyAircraft(state, typeId, ownership) {
       assetTypeId: typeId,
     });
   } else if (ownership === 'LEASED') {
-    const deposit = type.leaseWeekly * 8;
-    if (s.company.cash < deposit) return { state: s, error: 'Trésorerie insuffisante pour le dépôt de garantie du leasing.' };
-    s.company.cash -= deposit;
-    s.finance.leaseDeposits = (s.finance.leaseDeposits || 0) + deposit;
-    addLedger(s, s.meta.week, 'LEASE_DEPOSIT', -deposit, 'Dépôt de garantie leasing ' + type.name);
+    const securityDeposit = type.leaseWeekly * 8;
+    if (s.company.cash < securityDeposit) return { state: s, error: 'Trésorerie insuffisante pour le dépôt de garantie du leasing.' };
+    s.company.cash -= securityDeposit;
+    s.finance.leaseDeposits = (s.finance.leaseDeposits || 0) + securityDeposit;
+    addLedger(s, s.meta.week, 'LEASE_DEPOSIT', -securityDeposit, 'Dépôt de garantie leasing ' + type.name);
+    s.orders.push({
+      typeId, ownership, securityDeposit, weeksLeft: leadDays / 7,
+      orderedAt: referenceMs,
+      deliveryAt: referenceMs + leadDays * DAY_MS,
+    });
+    return { state: s, error: null };
   }
 
   s.orders.push({
