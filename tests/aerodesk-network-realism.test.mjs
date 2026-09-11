@@ -17,6 +17,10 @@ const E = loadEngine();
 
 function connectionState(secondDepartureMinute) {
   let state = E.newGame('Hub Air', 'CDG', 2001);
+  // The second leg FRA-LHR is a third-country service for a French AOC after Brexit;
+  // grant a specific fifth-freedom right so this fixture continues to test connection timing only.
+  state.company.trafficRights = state.company.trafficRights || [];
+  state.company.trafficRights.push({ originId: 'FRA', destId: 'LHR', kind: 'FIFTH_FREEDOM' });
   state.fleet.push(
     { id: 'A1', typeId: 'A220-300', ownership: 'OWNED', ageWeeks: 0, cycles: 0, flightHours: 0, condition: 100, status: 'ACTIVE', assignedRouteId: null },
     { id: 'A2', typeId: 'A220-300', ownership: 'OWNED', ageWeeks: 0, cycles: 0, flightHours: 0, condition: 100, status: 'ACTIVE', assignedRouteId: null },

@@ -132,6 +132,86 @@ const COMPETITOR_TEMPLATES = [
 function airport(id) { return AIRPORTS.find(a => a.id === id); }
 function aircraftType(id) { return AIRCRAFT_TYPES.find(t => t.id === id); }
 
+
+// Commercial availability is deliberately separate from the technical catalogue. A type may
+// exist for planning/reference purposes without being certificated or delivered to airlines yet.
+const AIRCRAFT_COMMERCIAL_OVERRIDES = {
+  '777-9': {
+    available: false,
+    status: 'CERTIFICATION_PENDING',
+    reason: 'Certification en cours ; première livraison commerciale annoncée pour 2027.',
+  },
+};
+
+function aircraftCommercialStatus(typeId, timestampMs = Date.now()) {
+  const type = aircraftType(typeId);
+  if (!type) return { available: false, status: 'UNKNOWN', reason: 'Type avion inconnu.' };
+  const override = AIRCRAFT_COMMERCIAL_OVERRIDES[typeId];
+  if (override) return { ...override };
+  return { available: true, status: 'IN_SERVICE', reason: null };
+}
+
+function commerciallyAvailableAircraftTypes(timestampMs = Date.now()) {
+  return AIRCRAFT_TYPES.filter(type => aircraftCommercialStatus(type.id, timestampMs).available);
+}
+
+
+// Regulatory market access is simplified to the freedoms-of-the-air concepts represented by
+// the game's geography. Specific bilateral/fifth/seventh/ninth-freedom rights can be granted
+// explicitly in company.trafficRights instead of assuming universal market access.
+const EU_COMMUNITY_AOC_COUNTRIES = new Set([
+  'France', 'Allemagne', 'Pays-Bas', 'Espagne', 'Italie', 'Belgique', 'Irlande',
+  'Portugal', 'Autriche', 'Danemark', 'Suède', 'Finlande', 'Grèce', 'Pologne',
+]);
+
+function hasSpecificTrafficRight(state, originId, destId) {
+  return (state?.company?.trafficRights || []).some(right =>
+    (right.originId === originId && right.destId === destId) ||
+    (right.originId === destId && right.destId === originId)
+  );
+}
+
+function trafficRightStatus(state, originId, destId) {
+  const origin = airport(originId);
+  const destination = airport(destId);
+  if (!origin || !destination) return { allowed: false, basis: 'REFERENCE', reason: 'Aéroport inconnu.' };
+  const aocCountry = state?.company?.aocCountry || airport(state?.company?.homeBase)?.country;
+  if (!aocCountry) return { allowed: false, basis: 'AOC', reason: 'Pays de l’AOC non défini.' };
+
+  if (hasSpecificTrafficRight(state, originId, destId)) {
+    return { allowed: true, basis: 'SPECIFIC_TRAFFIC_RIGHT', reason: null };
+  }
+
+  const originCountry = origin.country;
+  const destinationCountry = destination.country;
+  const communityCarrier = EU_COMMUNITY_AOC_COUNTRIES.has(aocCountry);
+  const bothCommunity = EU_COMMUNITY_AOC_COUNTRIES.has(originCountry) && EU_COMMUNITY_AOC_COUNTRIES.has(destinationCountry);
+
+  if (originCountry === destinationCountry) {
+    if (originCountry === aocCountry) return { allowed: true, basis: 'HOME_DOMESTIC', reason: null };
+    if (communityCarrier && bothCommunity) return { allowed: true, basis: 'EU_COMMUNITY_MARKET', reason: null };
+    return {
+      allowed: false,
+      basis: 'CABOTAGE',
+      reason: 'Cabotage étranger interdit sans droit ou autorisation spécifique.',
+    };
+  }
+
+  if (originCountry === aocCountry || destinationCountry === aocCountry) {
+    return { allowed: true, basis: '3RD_4TH_FREEDOM_HOME_STATE', reason: null };
+  }
+
+  if (communityCarrier && bothCommunity) {
+    return { allowed: true, basis: 'EU_COMMUNITY_MARKET', reason: null };
+  }
+
+  return {
+    allowed: false,
+    basis: 'EXTRA_BILATERAL_RIGHT_REQUIRED',
+    reason: 'Droit de trafic ou autorisation de 5e/7e liberté requis pour cette liaison hors pays de l’AOC.',
+  };
+}
+
 function haversineKm(a, b) {
   const R = 6371;
   const dLat = (b.lat - a.lat) * Math.PI / 180;
@@ -372,6 +452,114 @@ function airportCongestionFactor(airportId, timestampMs) {
   return clamp(sizeBase * wave, 0.12, 1.35);
 }
 
+
+// Airport coordination status is reference data; residual player-access capacity below is a
+// modeled game constraint, not a claim about live coordinator inventory. Level 3 means a slot
+// must be allocated before a planned arrival or departure can be operated.
+const AIRPORT_SLOT_COORDINATION = {
+  LHR: { level: 3, modeledPeakSeriesPerHalfHour: 1, modeledOffPeakSeriesPerHalfHour: 2 },
+  CDG: { level: 3, modeledPeakSeriesPerHalfHour: 1, modeledOffPeakSeriesPerHalfHour: 3 },
+};
+
+function airportCoordinationLevel(airportId) {
+  return AIRPORT_SLOT_COORDINATION[airportId]?.level || 1;
+}
+
+function slotScarcityFactor(airportId, localMinute) {
+  if (airportCoordinationLevel(airportId) !== 3) return 0;
+  const morningPeak = localMinute >= 6 * 60 && localMinute < 10 * 60;
+  const eveningPeak = localMinute >= 16 * 60 && localMinute < 20 * 60 + 30;
+  if (morningPeak || eveningPeak) return airportId === 'LHR' ? 1.0 : 0.9;
+  if (localMinute >= 10 * 60 && localMinute < 16 * 60) return airportId === 'LHR' ? 0.55 : 0.45;
+  return airportId === 'LHR' ? 0.35 : 0.28;
+}
+
+function localSlotDescriptor(airportId, timestampMs, movement) {
+  const ap = airport(airportId);
+  const local = zonedParts(timestampMs, ap?.timeZone || 'UTC');
+  const dayOfWeek = new Date(Date.UTC(local.year, local.month - 1, local.day)).getUTCDay();
+  const minute = local.hour * 60 + local.minute;
+  return {
+    airportId,
+    dayOfWeek,
+    minute,
+    bucketMinute: Math.floor(minute / 30) * 30,
+    movement,
+  };
+}
+
+function slotSeriesRequirements(route, referenceMs = Date.UTC(2026, 5, 7, 12, 0, 0)) {
+  const type = aircraftType(route.aircraftTypeId);
+  if (!type) return [];
+  const origin = airport(route.originId);
+  const distanceKm = distanceBetween(route.originId, route.destId);
+  const blockMs = blockTimeHours(distanceKm, type.cruiseKmh) * 3600000;
+  const turnaroundMs = (type.turnaround || 30) * 60000;
+  const reference = new Date(referenceMs);
+  const sunday = Date.UTC(reference.getUTCFullYear(), reference.getUTCMonth(), reference.getUTCDate() - reference.getUTCDay());
+  const requirements = [];
+
+  (route.schedule || []).forEach(slot => {
+    const date = new Date(sunday + slot.dayOfWeek * DAY_MS);
+    const outboundDeparture = zonedLocalToUtcMs(
+      date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate(),
+      Math.floor(slot.minute / 60), slot.minute % 60, origin?.timeZone || 'UTC',
+    );
+    const outboundArrival = outboundDeparture + blockMs;
+    const returnDeparture = outboundArrival + turnaroundMs;
+    const returnArrival = returnDeparture + blockMs;
+    [
+      localSlotDescriptor(route.originId, outboundDeparture, 'DEPARTURE'),
+      localSlotDescriptor(route.destId, outboundArrival, 'ARRIVAL'),
+      localSlotDescriptor(route.destId, returnDeparture, 'DEPARTURE'),
+      localSlotDescriptor(route.originId, returnArrival, 'ARRIVAL'),
+    ].forEach(requirement => {
+      if (airportCoordinationLevel(requirement.airportId) === 3) requirements.push(requirement);
+    });
+  });
+  return requirements;
+}
+
+function modeledSlotBucketCapacity(requirement) {
+  const config = AIRPORT_SLOT_COORDINATION[requirement.airportId];
+  if (!config || config.level !== 3) return Infinity;
+  const scarcity = slotScarcityFactor(requirement.airportId, requirement.minute);
+  return scarcity >= 0.8 ? config.modeledPeakSeriesPerHalfHour : config.modeledOffPeakSeriesPerHalfHour;
+}
+
+function slotRequirementKey(requirement) {
+  return [requirement.airportId, requirement.dayOfWeek, requirement.bucketMinute, requirement.movement].join('|');
+}
+
+function ensureSlotPortfolio(state) {
+  state.operations = state.operations || {};
+  state.operations.slotAllocations = state.operations.slotAllocations || [];
+  return state.operations.slotAllocations;
+}
+
+function canReserveRouteSlots(state, route, excludingRouteId = null) {
+  const portfolio = ensureSlotPortfolio(state);
+  const existing = excludingRouteId ? portfolio.filter(a => a.routeId !== excludingRouteId) : portfolio;
+  const requirements = slotSeriesRequirements(route, state.meta?.lastProcessedAt || Date.now());
+  const proposedCounts = {};
+  for (const requirement of requirements) {
+    const key = slotRequirementKey(requirement);
+    proposedCounts[key] = (proposedCounts[key] || 0) + 1;
+    const occupied = existing.filter(a => slotRequirementKey(a) === key).length;
+    if (occupied + proposedCounts[key] > modeledSlotBucketCapacity(requirement)) {
+      return { ok: false, requirement, requirements };
+    }
+  }
+  return { ok: true, requirements };
+}
+
+function reserveRouteSlots(state, route, requirements = null) {
+  const portfolio = ensureSlotPortfolio(state);
+  const needed = requirements || slotSeriesRequirements(route, state.meta?.lastProcessedAt || Date.now());
+  needed.forEach(requirement => portfolio.push({ ...requirement, routeId: route.id, seasonallyAllocated: true }));
+  return needed.length;
+}
+
 function validateRoutePlan({ originId, destId, aircraftTypeId, departMinute }) {
   const issues = [];
   const origin = airport(originId);
@@ -406,61 +594,96 @@ function validateRoutePlan({ originId, destId, aircraftTypeId, departMinute }) {
   return issues;
 }
 
-const MAX_AIRCRAFT_SERVICE_HOURS_PER_DAY = 18;
+const MAX_AIRCRAFT_SERVICE_HOURS_PER_DAY = 16;
 
 function buildOperationalPlan(state, route, fromMs, toMs, rng = Math.random) {
   const type = aircraftType(route.aircraftTypeId);
   const distanceKm = distanceBetween(route.originId, route.destId);
   const blockH = blockTimeHours(distanceKm, type.cruiseKmh);
-  const scheduledTimes = scheduledDepartureTimesBetween(route, fromMs, toMs);
-  const legalTimes = scheduledTimes.filter(departureAt => {
-    const arrivalAt = departureAt + blockH * 3600000;
-    return !movementBlockedByCurfew(route.originId, departureAt) && !movementBlockedByCurfew(route.destId, arrivalAt);
+  const turnaroundH = (type.turnaround || 30) / 60;
+  const scheduledRotationStarts = scheduledDepartureTimesBetween(route, fromMs, toMs);
+
+  const legalRotations = [];
+  let curfewRotations = 0;
+  scheduledRotationStarts.forEach(outboundDeparture => {
+    const outboundArrival = outboundDeparture + blockH * 3600000;
+    const returnDeparture = outboundArrival + turnaroundH * 3600000;
+    const returnArrival = returnDeparture + blockH * 3600000;
+    const blocked =
+      movementBlockedByCurfew(route.originId, outboundDeparture) ||
+      movementBlockedByCurfew(route.destId, outboundArrival) ||
+      movementBlockedByCurfew(route.destId, returnDeparture) ||
+      movementBlockedByCurfew(route.originId, returnArrival);
+    if (blocked) curfewRotations += 1;
+    else legalRotations.push({ outboundDeparture, outboundArrival, returnDeparture, returnArrival });
   });
-  const curfewCancellations = scheduledTimes.length - legalTimes.length;
+
   const assigned = state.fleet.filter(f =>
     f.assignedRouteId === route.id && f.status === 'ACTIVE' && f.typeId === route.aircraftTypeId
   );
   const elapsedDays = Math.max(0, (toMs - fromMs) / DAY_MS);
-  const serviceHoursPerFlight = blockH + (type.turnaround || 30) / 60;
+  // The second turnaround reserves the tail at origin before its next planned rotation.
+  const serviceHoursPerRotation = blockH * 2 + turnaroundH * 2;
   const capacityHours = assigned.length * MAX_AIRCRAFT_SERVICE_HOURS_PER_DAY * elapsedDays;
-  const utilizationCapacity = serviceHoursPerFlight > 0 ? Math.floor(capacityHours / serviceHoursPerFlight + 1e-9) : 0;
-  const candidateTimes = legalTimes.slice(0, utilizationCapacity);
-  const utilizationCancellations = Math.max(0, legalTimes.length - candidateTimes.length);
+  const utilizationCapacityRotations = serviceHoursPerRotation > 0
+    ? Math.floor(capacityHours / serviceHoursPerRotation + 1e-9)
+    : 0;
+  const candidateRotations = legalRotations.slice(0, utilizationCapacityRotations);
+  const utilizationCancelledRotations = Math.max(0, legalRotations.length - candidateRotations.length);
   const avgCondition = assigned.length ? assigned.reduce((sum, f) => sum + f.condition, 0) / assigned.length : 0;
 
+  const outboundDepartureTimes = [];
+  const returnDepartureTimes = [];
   const operatedDepartureTimes = [];
-  let technicalCancellations = 0;
+  let technicalCancelledRotations = 0;
   let delayedFlights = 0;
-  candidateTimes.forEach(departureAt => {
-    const arrivalAt = departureAt + blockH * 3600000;
+
+  candidateRotations.forEach(rotation => {
     const congestion = (
-      airportCongestionFactor(route.originId, departureAt) +
-      airportCongestionFactor(route.destId, arrivalAt)
-    ) / 2;
+      airportCongestionFactor(route.originId, rotation.outboundDeparture) +
+      airportCongestionFactor(route.destId, rotation.outboundArrival) +
+      airportCongestionFactor(route.destId, rotation.returnDeparture) +
+      airportCongestionFactor(route.originId, rotation.returnArrival)
+    ) / 4;
     const cancellationRisk = clamp(0.0015 + Math.max(0, 75 - avgCondition) * 0.0008 + congestion * 0.0045, 0.0015, 0.08);
     const delayRisk = clamp(0.025 + congestion * 0.13 + Math.max(0, 85 - avgCondition) * 0.002, 0.03, 0.40);
+
+    // If the outbound rotation is cancelled, the paired return sector cannot exist either.
     if (rng() < cancellationRisk) {
-      technicalCancellations += 1;
+      technicalCancelledRotations += 1;
       return;
     }
-    operatedDepartureTimes.push(departureAt);
+
+    outboundDepartureTimes.push(rotation.outboundDeparture);
+    returnDepartureTimes.push(rotation.returnDeparture);
+    operatedDepartureTimes.push(rotation.outboundDeparture, rotation.returnDeparture);
+    if (rng() < delayRisk) delayedFlights += 1;
     if (rng() < delayRisk) delayedFlights += 1;
   });
 
-  const cancelledFlights = curfewCancellations + utilizationCancellations + technicalCancellations;
+  const scheduledRotations = scheduledRotationStarts.length;
+  const operatedRotations = outboundDepartureTimes.length;
+  const cancelledRotations = curfewRotations + utilizationCancelledRotations + technicalCancelledRotations;
+
   return {
-    scheduledFlights: scheduledTimes.length,
-    operatedFlights: operatedDepartureTimes.length,
-    cancelledFlights,
+    scheduledRotations,
+    operatedRotations,
+    cancelledRotations,
+    scheduledFlights: scheduledRotations * 2,
+    operatedFlights: operatedRotations * 2,
+    cancelledFlights: cancelledRotations * 2,
     delayedFlights,
-    curfewCancellations,
-    utilizationCancellations,
-    technicalCancellations,
-    operatedDepartureTimes,
+    curfewCancellations: curfewRotations * 2,
+    utilizationCancellations: utilizationCancelledRotations * 2,
+    technicalCancellations: technicalCancelledRotations * 2,
+    outboundDepartureTimes,
+    returnDepartureTimes,
+    operatedDepartureTimes: operatedDepartureTimes.sort((a, b) => a - b),
     blockHoursPerFlight: blockH,
-    serviceHoursPerFlight,
-    utilizationCapacity,
+    serviceHoursPerFlight: blockH + turnaroundH,
+    serviceHoursPerRotation,
+    utilizationCapacity: utilizationCapacityRotations * 2,
+    utilizationCapacityRotations,
   };
 }
 
@@ -485,12 +708,14 @@ function newGame(companyName, homeBaseId, rngSeed) {
     version: 3,
     meta: { week: 1, year: new Date().getUTCFullYear(), weekOfYear: getISOWeek(new Date()), createdAt: Date.now(), lastProcessedAt: Date.now(), currentTime: new Date().toISOString(), rngSeed: rngSeed || Date.now() % 100000, realTime: true },
     company: {
-      name: companyName, homeBase: homeBaseId, cash: 45e6, currency: 'USD', reputation: 50, otp: 88,
+      name: companyName, homeBase: homeBaseId, aocCountry: airport(homeBaseId).country, trafficRights: [],
+      cash: 45e6, currency: 'USD', reputation: 50, otp: 88,
       founded: true, bankrupt: false, nextAircraftSerial: 1, nextRouteSerial: 1,
     },
     fleet: [],
     routes: [],
     orders: [], // pending aircraft deliveries
+    operations: { activeFlights: 0, completedFlights: 0, cancelledFlights: 0, delayedFlights: 0, totalPassengers: 0, activeFlightWindows: [], slotAllocations: [] },
     finance: {
       loans: [],
       leaseDeposits: 0,
@@ -500,12 +725,14 @@ function newGame(companyName, homeBaseId, rngSeed) {
       accounting: {
         passengerRevenue: 0,
         ancillaryRevenue: 0,
+        cargoRevenue: 0,
         fuelExpense: 0,
         laborExpense: 0,
         crewExpense: 0,
         maintenanceExpense: 0,
         airportExpense: 0,
         handlingExpense: 0,
+        cargoHandlingExpense: 0,
         distributionExpense: 0,
         disruptionExpense: 0,
         depreciationExpense: 0,
@@ -554,10 +781,12 @@ function seedCompetitorNetwork(c, rng) {
 }
 
 function pickAircraftForDistance(d, strategy) {
-  const candidates = AIRCRAFT_TYPES.filter(t => t.rangeKm >= d * 1.15);
-  const pool = candidates.length ? candidates : AIRCRAFT_TYPES.slice(-2);
+  const availableTypes = commerciallyAvailableAircraftTypes();
+  const candidates = availableTypes.filter(t => t.rangeKm >= d * 1.15);
+  const pool = candidates.length ? candidates : availableTypes.filter(t => t.category?.startsWith('WIDEBODY')).slice(-2);
+  if (!pool.length) return availableTypes[availableTypes.length - 1];
   if (strategy === 'REGIONAL') return pool[0];
-  if (d < 2000) return pool.find(t => t.category === 'NARROWBODY') || pool[0];
+  if (d < 2000) return pool.find(t => t.category === 'NARROWBODY' || t.category === 'REGIONAL') || pool[0];
   return pool[Math.floor(pool.length / 2)];
 }
 
@@ -580,18 +809,150 @@ function scheduleFitScore(seg, departSlots) {
   return best;
 }
 
+
+// Structural payload reference values are rounded planning figures. They are deliberately
+// separate from the published maximum-range number because maximum range is not available
+// at maximum payload. The taper below approximates the payload-range tradeoff until a full
+// type-specific AFM/performance implementation is introduced.
+const AIRCRAFT_MAX_PAYLOAD_KG = {
+  'ATR72-600': 7500,
+  'E190-E2': 13500,
+  'A220-300': 18500,
+  'A320neo': 19000,
+  'A321neo': 25300,
+  'A321XLR': 25000,
+  '737-8': 20500,
+  '787-9': 52600,
+  'A330-900': 44500,
+  'A350-900': 53000,
+  'A350-1000': 64000,
+  '777-9': 70000,
+};
+
+function standardCheckedBaggageKg(originId, destId) {
+  const origin = airport(originId);
+  const destination = airport(destId);
+  if (!origin || !destination) return 13;
+  if (origin.country === destination.country) return 11;
+  if (origin.region === 'EU' && destination.region === 'EU') return 13;
+  if (origin.region !== destination.region) return 15;
+  return 13;
+}
+
+function standardTrafficMassPerPassengerKg(originId, destId) {
+  // EASA standard all-adult passenger mass includes hand baggage; checked baggage is added separately.
+  return 84 + standardCheckedBaggageKg(originId, destId);
+}
+
+function missionPayloadLimitKg(type, distanceKm) {
+  if (!type || distanceKm < 0) return 0;
+  const structuralPayload = AIRCRAFT_MAX_PAYLOAD_KG[type.id] || type.seats * 105;
+  if (!type.rangeKm || distanceKm > type.rangeKm) return 0;
+  const rangeRatio = distanceKm / type.rangeKm;
+  if (rangeRatio <= 0.65) return structuralPayload;
+  const progress = clamp((rangeRatio - 0.65) / 0.35, 0, 1);
+  const payloadFraction = 1 - 0.45 * progress;
+  return structuralPayload * payloadFraction;
+}
+
+function payloadLimitedSeats(type, distanceKm, originId, destId) {
+  const trafficMass = standardTrafficMassPerPassengerKg(originId, destId);
+  if (!trafficMass) return 0;
+  return Math.max(0, Math.min(type.seats, Math.floor(missionPayloadLimitKg(type, distanceKm) / trafficMass)));
+}
+
+function availableBellyCargoKg(type, distanceKm, passengers, originId, destId) {
+  const trafficMass = Math.max(0, passengers) * standardTrafficMassPerPassengerKg(originId, destId);
+  return Math.max(0, missionPayloadLimitKg(type, distanceKm) - trafficMass);
+}
+
+
+// Cargo utilization is anchored to current IATA industry load-factor levels, while route-level
+// yield and corridor demand multipliers remain transparent simulation assumptions rather than
+// live freight quotations.
+function cargoLoadFactorTarget(state, originId, destId) {
+  const origin = airport(originId);
+  const destination = airport(destId);
+  const international = origin?.country && destination?.country && origin.country !== destination.country;
+  const industryAnchor = international ? 0.524 : 0.463;
+  const macro = clamp(state?.market?.macro?.demandIndex || 1, 0.70, 1.30);
+  let corridor = 1;
+  const pair = [origin?.region, destination?.region].sort().join('|');
+  if (pair === 'ASIA|EU') corridor = 1.08;
+  else if (pair === 'EU|NA') corridor = 1.04;
+  else if (pair === 'ASIA|NA') corridor = 1.10;
+  else if (pair.includes('AFRICA')) corridor = 0.96;
+  return clamp(industryAnchor * corridor * (0.9 + 0.1 * macro), 0.30, 0.68);
+}
+
+function cargoYieldUSDPerKg(distanceKm, originId, destId) {
+  const origin = airport(originId);
+  const destination = airport(destId);
+  const international = origin?.country && destination?.country && origin.country !== destination.country;
+  const distanceComponent = 0.00018 * Math.max(0, distanceKm);
+  return clamp((international ? 1.05 : 0.82) + distanceComponent, 0.85, 4.25);
+}
+
+function bellyCargoEconomics(state, type, originId, destId, distanceKm, passengersPerFlight, flights) {
+  const sectors = Math.max(0, flights || 0);
+  if (!type || sectors <= 0) return { availableKg: 0, carriedKg: 0, revenueUSD: 0, handlingCostUSD: 0, yieldUSDPerKg: 0, loadFactor: 0 };
+  const availablePerFlightKg = availableBellyCargoKg(type, distanceKm, passengersPerFlight, originId, destId);
+  const availableKg = availablePerFlightKg * sectors;
+  const loadFactor = cargoLoadFactorTarget(state, originId, destId);
+  const carriedKg = availableKg * loadFactor;
+  const yieldUSDPerKg = cargoYieldUSDPerKg(distanceKm, originId, destId);
+  const revenueUSD = carriedKg * yieldUSDPerKg;
+  const handlingCostUSD = carriedKg * 0.16;
+  return { availableKg, carriedKg, revenueUSD, handlingCostUSD, yieldUSDPerKg, loadFactor };
+}
+
 function routeHasActiveAircraft(state, route) {
   return state.fleet.some(f => f.assignedRouteId === route.id && f.status === 'ACTIVE');
 }
 
+
+function returnDepartureSlots(route, referenceMs = Date.now()) {
+  const type = aircraftType(route.aircraftTypeId);
+  if (!type) return [];
+  const destination = airport(route.destId);
+  const blockH = blockTimeHours(distanceBetween(route.originId, route.destId), type.cruiseKmh);
+  const turnaroundMs = (type.turnaround || 30) * 60000;
+  const weekStart = startOfIsoWeekUtc(referenceMs);
+  const departures = scheduledDepartureTimesBetween(route, weekStart - DAY_MS, weekStart + 7 * DAY_MS);
+  return departures.map(outboundDeparture => {
+    const returnDeparture = outboundDeparture + blockH * 3600000 + turnaroundMs;
+    const local = zonedParts(returnDeparture, destination?.timeZone || 'UTC');
+    return local.hour * 60 + local.minute;
+  });
+}
+
 function buildPlayerProducts(state, originId, destId) {
   const products = [];
-  const directRoutes = state.routes.filter(r =>
+
+  // Published routes are physical round trips. The stored route describes the outbound
+  // commercial service; its return sector is derived from block time + turnaround.
+  const outboundRoutes = state.routes.filter(r =>
     r.status === 'ACTIVE' && r.originId === originId && r.destId === destId && routeHasActiveAircraft(state, r)
   );
-  directRoutes.forEach(route => products.push(makeProductFromRoute(route, 'PLAYER', state.company, [route])));
+  outboundRoutes.forEach(route => products.push(
+    makeProductFromRoute(route, 'PLAYER', state.company, [route], {
+      direction: 'OUTBOUND', originId, destId,
+      departSlots: route.schedule.map(s => s.minute),
+    })
+  ));
 
-  // One-stop products are offered only when both operating legs have serviceable aircraft.
+  const returnRoutes = state.routes.filter(r =>
+    r.status === 'ACTIVE' && r.originId === destId && r.destId === originId && routeHasActiveAircraft(state, r)
+  );
+  returnRoutes.forEach(route => products.push(
+    makeProductFromRoute(route, 'PLAYER', state.company, [route], {
+      direction: 'RETURN', originId, destId,
+      departSlots: returnDepartureSlots(route, state.meta?.lastProcessedAt || Date.now()),
+    })
+  ));
+
+  // Keep connection construction schedule-aware. Connections are built from published
+  // outbound legs here; reverse-direction direct service is still fully sellable above.
   const legsOut = state.routes.filter(r =>
     r.status === 'ACTIVE' && r.originId === originId && r.destId !== destId && routeHasActiveAircraft(state, r)
   );
@@ -599,9 +960,10 @@ function buildPlayerProducts(state, originId, destId) {
     state.routes
       .filter(r => r.status === 'ACTIVE' && r.originId === leg1.destId && r.destId === destId && routeHasActiveAircraft(state, r))
       .forEach(leg2 => {
-        if (leg1.destId === originId) return;
-        const metrics = connectionScheduleMetrics(leg1, leg2, state.meta?.lastProcessedAt || Date.now());
-        if (metrics.feasibleFrequency > 0) products.push(makeConnectProduct([leg1, leg2], 'PLAYER', state.company, metrics));
+        if (leg1.destId !== originId) {
+          const metrics = connectionScheduleMetrics(leg1, leg2, state.meta?.lastProcessedAt || Date.now());
+          if (metrics.feasibleFrequency > 0) products.push(makeConnectProduct([leg1, leg2], 'PLAYER', state.company, metrics));
+        }
       });
   });
   return products;
@@ -616,16 +978,22 @@ function buildCompetitorProducts(state, originId, destId) {
   return products;
 }
 
-function makeProductFromRoute(route, owner, company, legs) {
+function makeProductFromRoute(route, owner, company, legs, options = {}) {
   const oType = aircraftType(route.aircraftTypeId);
-  const dist = distanceBetween(route.originId, route.destId);
+  const originId = options.originId || route.originId;
+  const destId = options.destId || route.destId;
+  const direction = options.direction || 'OUTBOUND';
+  const dist = distanceBetween(originId, destId);
+  const departSlots = options.departSlots || route.schedule.map(s => s.minute);
+  const missionSeats = payloadLimitedSeats(oType, dist, originId, destId);
   return {
-    key: 'P-' + route.id, owner, ownerRef: company, legs: 1, distanceKm: dist,
+    key: direction === 'RETURN' ? 'P-' + route.id + '-RETURN' : 'P-' + route.id,
+    owner, ownerRef: company, legs: 1, distanceKm: dist,
     freq: route.frequencyPerWeek, fareStrategy: route.fareStrategy,
-    departSlots: route.schedule.map(s => s.minute),
+    departSlots,
     totalTripHours: blockTimeHours(dist, oType.cruiseKmh),
     reputation: company.reputation, otp: company.otp,
-    seats: oType.seats, route,
+    seats: missionSeats, nominalSeats: oType.seats, route, direction, originId, destId,
   };
 }
 
@@ -635,19 +1003,19 @@ function makeConnectProduct(legs, owner, company, metrics = null) {
   const d1 = distanceBetween(l1.originId, l1.destId), d2 = distanceBetween(l2.originId, l2.destId);
   const bt1 = blockTimeHours(d1, t1.cruiseKmh), bt2 = blockTimeHours(d2, t2.cruiseKmh);
   const connection = metrics || connectionScheduleMetrics(l1, l2);
-  if (!connection.feasibleFrequency) return null;
+  const waitHours = Number.isFinite(connection.averageWaitHours) ? connection.averageWaitHours : connection.mctHours;
+  const seats1 = payloadLimitedSeats(t1, d1, l1.originId, l1.destId);
+  const seats2 = payloadLimitedSeats(t2, d2, l2.originId, l2.destId);
   return {
     key: 'P-' + l1.id + '-' + l2.id, owner, ownerRef: company, legs: 2,
     distanceKm: d1 + d2,
-    freq: connection.feasibleFrequency,
+    freq: connection.feasibleFrequency || Math.min(l1.frequencyPerWeek, l2.frequencyPerWeek),
     fareStrategy: l1.fareStrategy,
     departSlots: l1.schedule.map(s => s.minute),
-    totalTripHours: bt1 + bt2 + connection.averageWaitHours,
+    totalTripHours: bt1 + bt2 + waitHours,
     reputation: company.reputation, otp: company.otp - 6,
-    seats: Math.min(t1.seats, t2.seats), route: l1, secondRoute: l2,
-    mctGap: connection.averageWaitHours,
-    mctHours: connection.mctHours,
-    connectionWaitHours: connection.averageWaitHours,
+    seats: Math.min(seats1, seats2), route: l1, secondRoute: l2,
+    mctGap: waitHours,
   };
 }
 
@@ -660,7 +1028,8 @@ function makeProductFromCompetitorRoute(route, competitor) {
     key: 'P-' + route.id, owner: 'AI:' + competitor.id, ownerRef: competitor, legs: 1,
     distanceKm: dist, freq: route.freq, fareStrategy: route.fareStrategy,
     departSlots, totalTripHours: blockTimeHours(dist, type.cruiseKmh),
-    reputation: competitor.reputation, otp: 83, seats: type.seats, route,
+    reputation: competitor.reputation, otp: 83,
+    seats: payloadLimitedSeats(type, dist, route.origin, route.dest), nominalSeats: type.seats, route,
   };
 }
 
@@ -981,7 +1350,8 @@ function v3GetPnl(state) {
   const a = v3EnsureFinance(state);
   const revenue =
     (a.passengerRevenue || 0) +
-    (a.ancillaryRevenue || 0);
+    (a.ancillaryRevenue || 0) +
+    (a.cargoRevenue || 0);
 
   const expenses =
     (a.fuelExpense || 0) +
@@ -990,6 +1360,7 @@ function v3GetPnl(state) {
     (a.maintenanceExpense || 0) +
     (a.airportExpense || 0) +
     (a.handlingExpense || 0) +
+    (a.cargoHandlingExpense || 0) +
     (a.distributionExpense || 0) +
     (a.disruptionExpense || 0) +
     (a.depreciationExpense || 0) +
@@ -1051,6 +1422,26 @@ function realTimeTick(prevState, nowMs = Date.now()) {
   return state;
 }
 
+
+function directionalServiceCounts(plan) {
+  if (!plan) return { scheduled: 0, operated: 0 };
+  const scheduled = plan.scheduledRotations ?? Math.floor((plan.scheduledFlights || 0) / 2);
+  const operated = plan.operatedRotations ?? Math.floor((plan.operatedFlights || 0) / 2);
+  return {
+    scheduled: Math.max(0, scheduled),
+    operated: Math.max(0, Math.min(operated, scheduled)),
+  };
+}
+
+function directionalServiceShares(plan, publishedFrequency) {
+  const frequency = Math.max(1, publishedFrequency || 1);
+  const counts = directionalServiceCounts(plan);
+  return {
+    bookedShare: clamp(counts.scheduled / frequency, 0, 1),
+    operatedShare: clamp(counts.operated / frequency, 0, 1),
+  };
+}
+
 function processRealTimeDay(state, fromMs, toMs, rng) {
   const elapsed = toMs - fromMs;
   restoreMaintenanceRealTime(state, toMs);
@@ -1062,6 +1453,7 @@ function processRealTimeDay(state, fromMs, toMs, rng) {
   const marketKeys = new Set();
   state.routes.filter(r => r.status === 'ACTIVE').forEach(r => {
     marketKeys.add(r.originId + '|' + r.destId);
+    marketKeys.add(r.destId + '|' + r.originId);
     state.routes.filter(r2 => r2.status === 'ACTIVE' && r2.originId === r.destId)
       .forEach(r2 => marketKeys.add(r.originId + '|' + r2.destId));
   });
@@ -1087,14 +1479,18 @@ function processRealTimeDay(state, fromMs, toMs, rng) {
         if (!product) return;
         const freq = Math.max(1, product.freq);
         const weeklyPax = e.pax;
+        const primaryCounts = directionalServiceCounts(routeOperationalPlans[product.route.id]);
+        const secondaryCounts = product.legs === 2
+          ? directionalServiceCounts(routeOperationalPlans[product.secondRoute.id])
+          : null;
         const departures = product.legs === 1
-          ? (routeOperationalPlans[product.route.id]?.operatedFlights || 0)
-          : Math.min(routeOperationalPlans[product.route.id]?.operatedFlights || 0, routeOperationalPlans[product.secondRoute.id]?.operatedFlights || 0);
+          ? primaryCounts.operated
+          : Math.min(primaryCounts.operated, secondaryCounts.operated);
         const scheduledDepartures = product.legs === 1
-          ? (routeOperationalPlans[product.route.id]?.scheduledFlights || 0)
-          : Math.min(routeOperationalPlans[product.route.id]?.scheduledFlights || 0, routeOperationalPlans[product.secondRoute.id]?.scheduledFlights || 0);
-        const flightsShare = departures / freq;
-        const bookedShare = scheduledDepartures / freq;
+          ? primaryCounts.scheduled
+          : Math.min(primaryCounts.scheduled, secondaryCounts.scheduled);
+        const flightsShare = clamp(departures / freq, 0, 1);
+        const bookedShare = clamp(scheduledDepartures / freq, 0, 1);
         const pax = weeklyPax * flightsShare;
         const bookedPax = weeklyPax * bookedShare;
         const rev = pax * e.fare;
@@ -1174,29 +1570,33 @@ function processRealTimeDay(state, fromMs, toMs, rng) {
     const maintCost = type.maintPerHour * blockH * ageMult;
     const sizeFactor = type.seats / 180;
     const airportCost = ((airport(route.originId).fee + airport(route.destId).fee) / 3 * sizeFactor + dist * 0.34) * flights;
-    const handlingCost = pax * 12;
+    const passengerHandlingCost = pax * 12;
+    const passengersPerFlight = flights > 0 ? pax / flights : 0;
+    const cargo = bellyCargoEconomics(state, type, route.originId, route.destId, dist, passengersPerFlight, flights);
     const distributionCost = routeRev * 0.045;
-    const routeCost = fuelCost + crewCost + maintCost + airportCost + handlingCost + distributionCost;
+    const routeCost = fuelCost + crewCost + maintCost + airportCost + passengerHandlingCost + cargo.handlingCostUSD + distributionCost;
 
     const ancillary = v3AddAncillaryRevenue(state, routeRev);
     const carbonCost = v3ApplyCarbonCost(state, fuelLitersBurned, route.originId, route.destId);
 
-    revenue += routeRev + ancillary;
+    revenue += routeRev + ancillary + cargo.revenueUSD;
     costs += routeCost + carbonCost;
     breakdown.fuel += fuelCost;
     breakdown.crew += crewCost;
     breakdown.maint += maintCost;
     breakdown.airport += airportCost;
-    breakdown.handling += handlingCost;
+    breakdown.handling += passengerHandlingCost + cargo.handlingCostUSD;
     breakdown.distribution += distributionCost;
     breakdown.taxes += carbonCost;
 
     accounting.passengerRevenue = (accounting.passengerRevenue || 0) + routeRev;
+    accounting.cargoRevenue = (accounting.cargoRevenue || 0) + cargo.revenueUSD;
     accounting.fuelExpense = (accounting.fuelExpense || 0) + fuelCost;
     accounting.crewExpense = (accounting.crewExpense || 0) + crewCost;
     accounting.maintenanceExpense = (accounting.maintenanceExpense || 0) + maintCost;
     accounting.airportExpense = (accounting.airportExpense || 0) + airportCost;
-    accounting.handlingExpense = (accounting.handlingExpense || 0) + handlingCost;
+    accounting.handlingExpense = (accounting.handlingExpense || 0) + passengerHandlingCost;
+    accounting.cargoHandlingExpense = (accounting.cargoHandlingExpense || 0) + cargo.handlingCostUSD;
     accounting.distributionExpense = (accounting.distributionExpense || 0) + distributionCost;
 
     state.operations.totalPassengers += Math.round(pax);
@@ -1207,7 +1607,7 @@ function processRealTimeDay(state, fromMs, toMs, rng) {
 
     const loadFactor = flights ? pax / (type.seats * flights) : 0;
     route.history = route.history || [];
-    route.history.push({ time: new Date(toMs).toISOString(), week: state.meta.week, pax: Math.round(pax), revenue: routeRev + ancillary, cost: routeCost + carbonCost + disruption.totalUSD, loadFactor, scheduledFlights: plan.scheduledFlights, operatedFlights: flights, cancelledFlights: plan.cancelledFlights, delayedFlights: plan.delayedFlights });
+    route.history.push({ time: new Date(toMs).toISOString(), week: state.meta.week, pax: Math.round(pax), cargoKg: Math.round(cargo.carriedKg), cargoRevenue: cargo.revenueUSD, revenue: routeRev + ancillary + cargo.revenueUSD, cost: routeCost + carbonCost + disruption.totalUSD, loadFactor, scheduledFlights: plan.scheduledFlights, operatedFlights: flights, cancelledFlights: plan.cancelledFlights, delayedFlights: plan.delayedFlights });
     if (route.history.length > 365) route.history.splice(0, route.history.length - 365);
     if (route.fareStrategy === 'YIELD_OPTIMIZED') adaptYield(route, loadFactor);
 
@@ -1541,15 +1941,34 @@ function calculateDepreciationExpense(state, elapsedMs) {
 
 function actionOpenRoute(state, { originId, destId, aircraftTypeId, frequencyPerWeek, fareStrategy, departMinute }) {
   const s = structuredCloneLite(state);
+  if (!s.company.aocCountry) s.company.aocCountry = airport(s.company.homeBase)?.country;
+  if (!Array.isArray(s.company.trafficRights)) s.company.trafficRights = [];
+
+  const trafficRight = trafficRightStatus(s, originId, destId);
+  if (!trafficRight.allowed) {
+    s.lastActionError = trafficRight.reason;
+    return s;
+  }
+
   const issues = validateRoutePlan({ originId, destId, aircraftTypeId, departMinute });
   if (issues.length) {
     s.lastActionError = issues.map(issue => issue.message).join(' ');
     return s;
   }
-  delete s.lastActionError;
-  const id = 'R' + (s.company.nextRouteSerial++);
+
+  const id = 'R' + s.company.nextRouteSerial;
   const schedule = buildWeeklySchedule(frequencyPerWeek, departMinute);
-  s.routes.push({ id, originId, destId, aircraftTypeId, frequencyPerWeek, fareStrategy: fareStrategy || 'COMPETITIVE', schedule, status: 'ACTIVE', history: [] });
+  const candidate = { id, originId, destId, aircraftTypeId, frequencyPerWeek, fareStrategy: fareStrategy || 'COMPETITIVE', schedule, status: 'ACTIVE', history: [] };
+  const slotCheck = canReserveRouteSlots(s, candidate);
+  if (!slotCheck.ok) {
+    s.lastActionError = 'Capacité de créneau indisponible à ' + slotCheck.requirement.airportId + ' sur ce bucket coordonné.';
+    return s;
+  }
+
+  delete s.lastActionError;
+  s.company.nextRouteSerial += 1;
+  s.routes.push(candidate);
+  reserveRouteSlots(s, candidate, slotCheck.requirements);
   return s;
 }
 
@@ -1563,10 +1982,19 @@ function actionSetFareStrategy(state, routeId, fareStrategy) {
 function actionSetFrequency(state, routeId, frequencyPerWeek) {
   const s = structuredCloneLite(state);
   const r = s.routes.find(x => x.id === routeId);
-  if (r) {
-    r.frequencyPerWeek = frequencyPerWeek;
-    r.schedule = buildWeeklySchedule(frequencyPerWeek, r.schedule[0]?.minute ?? 480);
+  if (!r) return s;
+  const candidate = { ...r, frequencyPerWeek, schedule: buildWeeklySchedule(frequencyPerWeek, r.schedule[0]?.minute ?? 480) };
+  const slotCheck = canReserveRouteSlots(s, candidate, routeId);
+  if (!slotCheck.ok) {
+    s.lastActionError = 'Capacité de créneau indisponible à ' + slotCheck.requirement.airportId + ' pour cette hausse de fréquence.';
+    return s;
   }
+  delete s.lastActionError;
+  r.frequencyPerWeek = candidate.frequencyPerWeek;
+  r.schedule = candidate.schedule;
+  const portfolio = ensureSlotPortfolio(s);
+  s.operations.slotAllocations = portfolio.filter(a => a.routeId !== routeId);
+  reserveRouteSlots(s, r, slotCheck.requirements);
   return s;
 }
 
@@ -1581,6 +2009,11 @@ function actionBuyAircraft(state, typeId, ownership) {
   const s = structuredCloneLite(state);
   const type = aircraftType(typeId);
   if (!type) return { state: s, error: 'Type avion inconnu.' };
+  const referenceMs = s.meta?.lastProcessedAt || (s.meta?.currentTime ? Date.parse(s.meta.currentTime) : Date.now());
+  const commercialStatus = aircraftCommercialStatus(typeId, referenceMs);
+  if (!commercialStatus.available) {
+    return { state: s, error: type.name + ' indisponible : ' + commercialStatus.reason };
+  }
   const leadDays = deliveryLeadDays(type, ownership);
 
   if (ownership === 'OWNED') {
@@ -1591,7 +2024,7 @@ function actionBuyAircraft(state, typeId, ownership) {
     const principal = type.price - downPayment;
     const annualRate = clamp(0.057 + Math.max(0, 60 - s.company.reputation) * 0.0008 + (s.company.cash < 10e6 ? 0.012 : 0), 0.05, 0.105);
     const weeklyRate = Math.pow(1 + annualRate, 1 / 52) - 1;
-    const termWeeks = 624; // 12 years
+    const termWeeks = 624;
     const annuityFactor = weeklyRate / (1 - Math.pow(1 + weeklyRate, -termWeeks));
     s.finance.loans.push({
       id: 'L' + Date.now() % 100000, principal, weeklyRate, annualRate,
@@ -1600,14 +2033,23 @@ function actionBuyAircraft(state, typeId, ownership) {
     });
   } else if (ownership === 'LEASED') {
     const securityDeposit = type.leaseWeekly * 8;
-    if (s.company.cash < securityDeposit) return { state: s, error: 'Trésorerie insuffisante pour le dépôt de garantie du bail.' };
+    if (s.company.cash < securityDeposit) return { state: s, error: 'Trésorerie insuffisante pour le dépôt de garantie du leasing.' };
     s.company.cash -= securityDeposit;
     s.finance.leaseDeposits = (s.finance.leaseDeposits || 0) + securityDeposit;
-    s.orders.push({ typeId, ownership, securityDeposit, weeksLeft: leadDays / 7, deliveryAt: Date.now() + leadDays * DAY_MS });
+    addLedger(s, s.meta.week, 'LEASE_DEPOSIT', -securityDeposit, 'Dépôt de garantie leasing ' + type.name);
+    s.orders.push({
+      typeId, ownership, securityDeposit, weeksLeft: leadDays / 7,
+      orderedAt: referenceMs,
+      deliveryAt: referenceMs + leadDays * DAY_MS,
+    });
     return { state: s, error: null };
   }
 
-  s.orders.push({ typeId, ownership, weeksLeft: leadDays / 7, deliveryAt: Date.now() + leadDays * DAY_MS });
+  s.orders.push({
+    typeId, ownership, weeksLeft: leadDays / 7,
+    orderedAt: referenceMs,
+    deliveryAt: referenceMs + leadDays * DAY_MS,
+  });
   return { state: s, error: null };
 }
 
@@ -2168,7 +2610,7 @@ function BuyAircraftForm({ state, dispatch, notify, onDone }) {
   return (
     <Panel title="Acquérir un appareil" right={<button className="btn btn-xs" onClick={onDone}><X size={13} /></button>}>
       <div className="ac-grid">
-        {AIRCRAFT_TYPES.map(t => (
+        {commerciallyAvailableAircraftTypes(state.meta?.lastProcessedAt || Date.now()).map(t => (
           <button key={t.id} className={'ac-card' + (t.id === typeId ? ' selected' : '')} onClick={() => setTypeId(t.id)}>
             <div className="ac-card-name">{t.name}</div>
             <div className="ac-card-spec">{t.seats} sièges · {fmtNum(t.rangeKm)} km</div>
