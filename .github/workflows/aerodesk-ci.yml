@@ -32,8 +32,8 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Run engine regression tests
-        run: node --test tests/aerodesk-engine.test.mjs
+      - name: Run complete regression suite
+        run: node --test tests/*.test.mjs
 
       - name: Validate AeroDesk JSX
         run: npx --yes esbuild aerodesk.jsx --bundle --loader:.jsx=jsx --external:react --external:recharts --external:lucide-react --outfile=/tmp/aerodesk-check.js
