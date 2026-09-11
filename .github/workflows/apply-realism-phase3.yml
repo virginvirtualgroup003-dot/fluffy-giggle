@@ -1,0 +1,43 @@
+name: Apply AeroDesk realism phase 3
+
+on:
+  push:
+    branches:
+      - fix/aerodesk-v3-accounting-runtime
+    paths:
+      - scripts/apply_realism_phase3.py
+      - .github/workflows/apply-realism-phase3.yml
+
+permissions:
+  contents: write
+
+jobs:
+  improve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout realism branch
+        uses: actions/checkout@v4
+        with:
+          ref: fix/aerodesk-v3-accounting-runtime
+
+      - name: Apply phase 3 realism upgrade
+        run: python3 scripts/apply_realism_phase3.py
+
+      - name: Run complete regression suite
+        run: node --test tests/*.test.mjs
+
+      - name: Validate JSX bundle
+        run: npx --yes esbuild aerodesk.jsx --bundle --loader:.jsx=jsx --external:react --external:recharts --external:lucide-react --outfile=/tmp/aerodesk-check.js
+
+      - name: Commit upgraded AeroDesk source
+        run: |
+          if git diff --quiet -- aerodesk.jsx; then
+            echo "No AeroDesk source changes to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add aerodesk.jsx
+          git commit -m "feat: add regulatory fuel planning and passenger rights"
+          git push origin HEAD:fix/aerodesk-v3-accounting-runtime
