@@ -26,6 +26,21 @@ jobs:
         with:
           node-version: '22'
 
+      - name: Normalize patch-script template literals
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('scripts/improve-aerodesk-v3.mjs')
+          text = p.read_text()
+          text = text.replace("text: `Livraison d'un ${aircraftType(o.typeId).name}.`", "text: \\`Livraison d'un \\${aircraftType(o.typeId).name}.\\`")
+          text = text.replace("text: `${f.id} est remis en service après maintenance.`", "text: \\`\\${f.id} est remis en service après maintenance.\\`")
+          text = text.replace("text: `Trésorerie négative prolongée : la compagnie est en cessation de paiements.`", "text: \\`Trésorerie négative prolongée : la compagnie est en cessation de paiements.\\`")
+          p.write_text(text)
+          PY
+
+      - name: Validate improvement patch syntax
+        run: node --check scripts/improve-aerodesk-v3.mjs
+
       - name: Apply deterministic improvement patch
         run: node scripts/improve-aerodesk-v3.mjs
 
