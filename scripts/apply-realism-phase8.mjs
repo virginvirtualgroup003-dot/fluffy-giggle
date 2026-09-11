@@ -174,7 +174,7 @@ function actionOpenRoute(state, { originId, destId, aircraftTypeId, frequencyPer
   const candidate = { id, originId, destId, aircraftTypeId, frequencyPerWeek, fareStrategy: fareStrategy || 'COMPETITIVE', schedule, status: 'ACTIVE', history: [] };
   const slotCheck = canReserveRouteSlots(s, candidate);
   if (!slotCheck.ok) {
-    s.lastActionError = `Capacité de créneau indisponible à ${slotCheck.requirement.airportId} sur ce bucket coordonné.`;
+    s.lastActionError = 'Capacité de créneau indisponible à ' + slotCheck.requirement.airportId + ' sur ce bucket coordonné.';
     return s;
   }
 
@@ -194,7 +194,7 @@ function actionSetFrequency(state, routeId, frequencyPerWeek) {
   const candidate = { ...r, frequencyPerWeek, schedule: buildWeeklySchedule(frequencyPerWeek, r.schedule[0]?.minute ?? 480) };
   const slotCheck = canReserveRouteSlots(s, candidate, routeId);
   if (!slotCheck.ok) {
-    s.lastActionError = `Capacité de créneau indisponible à ${slotCheck.requirement.airportId} pour cette hausse de fréquence.`;
+    s.lastActionError = 'Capacité de créneau indisponible à ' + slotCheck.requirement.airportId + ' pour cette hausse de fréquence.';
     return s;
   }
   delete s.lastActionError;
