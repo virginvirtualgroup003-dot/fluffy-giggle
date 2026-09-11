@@ -4,17 +4,19 @@ on:
   push:
     paths:
       - aerodesk.jsx
+      - tests/**
       - .github/workflows/aerodesk-ci.yml
   pull_request:
     paths:
       - aerodesk.jsx
+      - tests/**
       - .github/workflows/aerodesk-ci.yml
 
 permissions:
   contents: read
 
 jobs:
-  validate-jsx:
+  validate:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -25,6 +27,9 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+
+      - name: Run engine regression tests
+        run: node --test tests/aerodesk-engine.test.mjs
 
       - name: Validate AeroDesk JSX
         run: npx --yes esbuild aerodesk.jsx --bundle --loader:.jsx=jsx --external:react --external:recharts --external:lucide-react --outfile=/tmp/aerodesk-check.js
